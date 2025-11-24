@@ -1,0 +1,47 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:flexcrew/services/navigation_service.dart';\r\n
+String _normalizeRole(String? raw) {
+  final r = (raw ?? '').toString().trim().toLowerCase();
+  if (r == 'employer') return 'employer';
+  // treat any non-employer as worker
+  return 'worker';
+}
+
+/// Resolve persisted role for the current user and navigate to the appropriate home.
+/// Returns the resolved role ('employer'|'worker') or null if not signed in.
+Future<String?> navigateToPersistedRole(BuildContext context, {String fallback = 'worker'}) async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    // not signed in — caller should handle routing to /login
+    return null;
+  }
+
+  try {
+    final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+    final raw = doc.data()?['role'] as String?;
+    final role = _normalizeRole(raw ?? fallback);
+
+    // persist normalized role back to users/{uid} (best-effort)
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({'role': role}, SetOptions(merge: true));
+    } catch (_) {
+      // ignore write errors — navigation will still work
+    }
+
+    if (role == 'employer') {
+      if (context.mounted) NavigationService.instance.go('/employer');
+    } else {
+      if (context.mounted) NavigationService.instance.go('/worker');
+    }
+
+    return role;
+  } catch (e) {
+    // on error fall back to worker
+    if (context.mounted) NavigationService.instance.go('/worker');
+    return 'worker';
+  }
+}
+

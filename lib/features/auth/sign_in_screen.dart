@@ -1,0 +1,409 @@
+﻿// (updated) SignInScreen accepts optional role, persists a normalized role to users/{uid},
+// and delegates final navigation to navigateToPersistedRole(...)
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flexcrew/utils/nav_helpers.dart';
+import 'package:flexcrew/services/navigation_service.dart';
+class SignInScreen extends StatefulWidget {
+  const SignInScreen({super.key, this.role});
+
+  // optional initial role: 'crew' | 'employer'
+  final String? role;
+
+  @override
+  State<SignInScreen> createState() => _SignInScreenState();
+}
+
+class _SignInScreenState extends State<SignInScreen> {
+  String _selectedRole = 'crew';
+  final _formKey = GlobalKey<FormState>();
+  final _emailCtl = TextEditingController();
+  final _passCtl = TextEditingController();
+  bool _loading = false;
+  bool _rememberEmail = false;
+
+  static const _prefRememberKey = 'remember_email';
+  static const _prefSavedEmailKey = 'saved_email';
+
+  @override
+  void initState() {
+    super.initState();
+    // honor optional role passed in
+    if (widget.role != null && widget.role!.trim().isNotEmpty) {
+      final r = widget.role!.trim().toLowerCase();
+      if (r == 'employer') _selectedRole = 'employer';
+      else _selectedRole = 'crew';
+    }
+    _loadSavedEmail();
+  }
+
+  String _normalizeRole(String uiRole) {
+    final r = uiRole.trim().toLowerCase();
+    if (r == 'employer') return 'employer';
+    return 'worker'; // map crew -> worker and fallback
+  }
+
+  Future<void> _loadSavedEmail() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final remember = prefs.getBool(_prefRememberKey) ?? false;
+      final saved = prefs.getString(_prefSavedEmailKey) ?? '';
+      if (!mounted) return;
+      setState(() {
+        _rememberEmail = remember;
+        if (remember && saved.isNotEmpty) _emailCtl.text = saved;
+      });
+    } catch (_) {
+      // ignore preferences errors
+    }
+  }
+
+  Future<void> _saveEmail(String email) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_prefRememberKey, true);
+      await prefs.setString(_prefSavedEmailKey, email);
+    } catch (_) {}
+  }
+
+  Future<void> _removeSavedEmail() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_prefSavedEmailKey);
+      await prefs.setBool(_prefRememberKey, false);
+    } catch (_) {}
+  }
+
+  Future<UserCredential?> _signInWithGoogle() async {
+    final auth = FirebaseAuth.instance;
+    try {
+      if (kIsWeb) {
+        final provider = GoogleAuthProvider();
+        return await auth.signInWithPopup(provider);
+      } else {
+        final google = GoogleSignIn(scopes: ['email']);
+        final acc = await google.signIn();
+        if (acc == null) return null;
+        final authDetails = await acc.authentication;
+        final credential = GoogleAuthProvider.credential(
+          accessToken: authDetails.accessToken,
+          idToken: authDetails.idToken,
+        );
+        return await auth.signInWithCredential(credential);
+      }
+    } catch (e) {
+      debugPrint('Google sign-in failed: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> _persistRoleForUid(String uid) async {
+    final normalized = _normalizeRole(_selectedRole);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'role': normalized,
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('Failed to persist role for $uid: $e');
+    }
+  }
+
+  Future<void> _handleGooglePressed() async {
+    FocusScope.of(context).unfocus();
+    setState(() => _loading = true);
+    try {
+      final userCred = await _signInWithGoogle();
+      final email = userCred?.user?.email;
+      // Save/remove only after successful authentication
+      if (userCred != null && mounted) {
+        if (_rememberEmail && email != null && email.isNotEmpty) {
+          await _saveEmail(email);
+        } else if (!_rememberEmail) {
+          await _removeSavedEmail();
+        }
+        // persist role to users/{uid}
+        final uid = userCred.user?.uid;
+        if (uid != null) await _persistRoleForUid(uid);
+
+        // Delegate final navigation to centralized helper that reads users/{uid}.role
+        await navigateToPersistedRole(context, fallback: 'worker');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Google sign-in failed: ${e.toString()}')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _handleEmailSignIn() async {
+    if (!_formKey.currentState!.validate()) return;
+    FocusScope.of(context).unfocus();
+    final email = _emailCtl.text.trim();
+    final pass = _passCtl.text;
+    setState(() => _loading = true);
+    try {
+      final cred = await FirebaseAuth.instance.signInWithEmailAndPassword(email: email, password: pass);
+      // Save/remove only after successful authentication
+      if (_rememberEmail) {
+        await _saveEmail(email);
+      } else {
+        await _removeSavedEmail();
+      }
+      if (!mounted) return;
+
+      // persist role to users/{uid}
+      final uid = cred.user?.uid;
+      if (uid != null) await _persistRoleForUid(uid);
+
+      // Delegate final navigation to centralized helper that reads users/{uid}.role
+      await navigateToPersistedRole(context, fallback: 'worker');
+    } on FirebaseAuthException catch (e) {
+      final msg = switch (e.code) {
+        'user-not-found' => 'No user found for that email.',
+        'wrong-password' => 'Incorrect password.',
+        'too-many-requests' => 'Too many attempts. Try again later.',
+        _ => e.message ?? 'Sign in failed'
+      };
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Sign in error: $e')));
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _onForgotPassword() async {
+    final controller = TextEditingController(text: _emailCtl.text.trim());
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Reset password'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Email', hintText: 'your@email.com'),
+          keyboardType: TextInputType.emailAddress,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Send')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final email = controller.text.trim();
+    if (email.isEmpty) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an email to reset')));
+      return;
+    }
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Password reset email sent')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  void _onCreateAccountPressed() {
+    GoRouter.of(context).pushNamed('create-account', extra: {'role': _selectedRole});
+  }
+
+  Widget _googleIcon() {
+    const pngPath = 'assets/icons/google_g.png';
+    return SizedBox(width: 20, height: 20, child: Image.asset(pngPath, fit: BoxFit.contain));
+  }
+
+  @override
+  void dispose() {
+    _emailCtl.dispose();
+    _passCtl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+
+    final toggleStyle = (bool selected) => ElevatedButton.styleFrom(
+          backgroundColor: selected ? primary : Colors.white,
+          foregroundColor: selected ? Colors.white : Colors.black87,
+          side: BorderSide(color: primary),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        );
+
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 520),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: SizedBox(
+                          width: 320,
+                          child: Image.asset('assets/branding/flexcrew-logo.png', fit: BoxFit.contain),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton(
+                              style: toggleStyle(_selectedRole == 'crew'),
+                              onPressed: _loading ? null : () => setState(() => _selectedRole = 'crew'),
+                              child: const Text('Crew'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton(
+                              style: toggleStyle(_selectedRole == 'employer'),
+                              onPressed: _loading ? null : () => setState(() => _selectedRole = 'employer'),
+                              child: const Text('Employer'),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // Email (full width)
+                      TextFormField(
+                        enabled: !_loading,
+                        controller: _emailCtl,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: const InputDecoration(prefixIcon: Icon(Icons.email), hintText: 'Email'),
+                        validator: (v) => (v == null || v.trim().isEmpty) ? 'Enter your email' : null,
+                      ),
+
+                      const SizedBox(height: 8),
+
+                      // Password (full width)
+                      Form(
+                        key: _formKey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            TextFormField(
+                              enabled: !_loading,
+                              controller: _passCtl,
+                              obscureText: true,
+                              decoration: const InputDecoration(prefixIcon: Icon(Icons.lock), hintText: 'Password'),
+                              validator: (v) => (v == null || v.isEmpty) ? 'Enter your password' : null,
+                            ),
+
+                            const SizedBox(height: 12),
+
+                            // Remember me checkbox below password
+                            Row(
+                              children: [
+                                Checkbox(
+                                  value: _rememberEmail,
+                                  onChanged: _loading
+                                      ? null
+                                      : (v) {
+                                          setState(() => _rememberEmail = v ?? false);
+                                        },
+                                ),
+                                GestureDetector(
+                                  onTap: _loading ? null : () => setState(() => _rememberEmail = !_rememberEmail),
+                                  child: Text('Remember me', style: TextStyle(color: Theme.of(context).colorScheme.onSurface)),
+                                ),
+                              ],
+                            ),
+
+                            const SizedBox(height: 8),
+
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(backgroundColor: primary, foregroundColor: Colors.white),
+                                onPressed: _loading ? null : _handleEmailSignIn,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  child: _loading
+                                      ? SizedBox(
+                                          height: 16,
+                                          width: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).colorScheme.onPrimary),
+                                          ),
+                                        )
+                                      : const Text('Sign in'),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            side: BorderSide(color: primary),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          icon: _googleIcon(),
+                          label: const Text('Sign in with Google'),
+                          onPressed: _loading ? null : _handleGooglePressed,
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      // swapped & aligned: Forgot (left) | Create Account (right)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          TextButton(
+                            onPressed: _loading ? null : _onForgotPassword,
+                            child: Text('Forgot password?', style: TextStyle(color: primary)),
+                          ),
+                          TextButton(
+                            onPressed: _loading ? null : _onCreateAccountPressed,
+                            child: Text('Create Account', style: TextStyle(color: primary)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              if (_loading) ...[
+                Positioned.fill(child: ModalBarrier(color: Colors.black45, dismissible: false)),
+                Center(child: CircularProgressIndicator(color: primary)),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+

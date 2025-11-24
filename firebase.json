@@ -1,0 +1,37 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "flexcrew-1f436",
+          "appId": "1:452426691626:android:764bd76b5a173979c7ff53",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "flexcrew-1f436",
+          "configurations": {
+            "android": "1:452426691626:android:764bd76b5a173979c7ff53",
+            "ios": "1:452426691626:ios:a24d362a3bf66bdfc7ff53",
+            "macos": "1:452426691626:ios:a24d362a3bf66bdfc7ff53",
+            "web": "1:452426691626:web:2329163d119d8745c7ff53"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "database": "(default)",
+    "location": "asia-southeast1",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "indexes": {
+    "indexes": [],
+    "fieldOverrides": []
+  }
+}

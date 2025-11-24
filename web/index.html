@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base href="$FLUTTER_BASE_HREF">
+    <meta charset="UTF-8">
+    <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+    <meta name="description" content="FlexCrew web app">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="FlexCrew">
+    <link rel="apple-touch-icon" href="icons/Icon-192.png">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#ffffff">
+    <title>FlexCrew - Your Crew. On Demand</title>
+
+    <style id="splash-screen-style">
+        html, body {
+            height: 100%;
+            margin: 0;
+            background-color: #FFFFFF;
+        }
+
+        #splash {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #FFFFFF;
+            z-index: 9999;
+        }
+
+            #splash img {
+                width: 400px;
+                height: auto;
+            }
+    </style>
+    <script id="splash-screen-script">
+    // Remove splash after Flutter boots
+        function removeSplashFromWeb() {
+            const s = document.getElementById('splash');
+            if (s) s.remove();
+        }</script>
+</head>
+<body>
+    <div id="splash">
+        <!-- keep splash at /assets/branding/... -->
+        <img src="assets/branding/flexcrew-logo.png" alt="FlexCrew">
+    </div>
+
+    <script>console.log('index.html loaded — web shell alive');</script>
+    <script src="flutter.js" defer></script>
+    <script src="flutter_bootstrap.js" defer></script>
+
+    <script>
+        // Remove splash when Flutter signals first frame
+        window.addEventListener('flutter-first-frame', function () {
+            removeSplashFromWeb();
+        });
+        setTimeout(removeSplashFromWeb, 5000);
+    </script>
+</body>
+</html>

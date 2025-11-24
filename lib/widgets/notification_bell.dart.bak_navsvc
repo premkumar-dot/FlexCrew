@@ -1,0 +1,152 @@
+﻿import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:flexcrew/utils/nav_helpers.dart';
+import 'package:flexcrew/services/navigation_service.dart';
+/// NotificationBell: shows unread count and a simple popup list of recent notifications.
+/// Each notification should have fields:
+///  - title (string)
+///  - body (string)
+///  - read (bool)
+///  - data.route (optional string)
+class NotificationBell extends StatelessWidget {
+  const NotificationBell({super.key});
+
+  Future<String> _resolveRoleForUid(String uid) async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final raw = doc.data()?['role'] as String? ?? '';
+      final role = raw.trim().toLowerCase();
+      if (role == 'employer') return 'employer';
+    } catch (_) {
+      // ignore
+    }
+    return 'worker';
+  }
+
+  String _normalizeRoute(String raw) {
+    if (raw.isEmpty) return '';
+    return raw.startsWith('/') ? raw : '/$raw';
+  }
+
+  Future<void> _navigateForNotification(BuildContext ctx, Map<String, dynamic>? data) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      if (ctx.mounted) GoRouter.of(ctx).go('/login');
+      return;
+    }
+
+    final routeRaw = (data?['route'] as String?) ?? '';
+    if (routeRaw.isEmpty) {
+      // No route provided: navigate to notifications page or home
+      if (ctx.mounted) GoRouter.of(ctx).go('/notifications');
+      return;
+    }
+
+    // If route explicitly targets employer or worker, use it directly.
+    final route = _normalizeRoute(routeRaw);
+    if (route.startsWith('/worker') || route.startsWith('/employer')) {
+      if (ctx.mounted) GoRouter.of(ctx).go(route);
+      return;
+    }
+
+    // Otherwise resolve persisted role and prefix the route.
+    final role = await _resolveRoleForUid(uid);
+    final base = role == 'employer' ? '/employer' : '/worker';
+    final target = route.startsWith('/') ? '$base${route}' : '$base/$route';
+    if (ctx.mounted) GoRouter.of(ctx).go(target);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return IconButton(
+        icon: const Icon(Icons.notifications_none),
+        onPressed: () => NavigationService.instance.go('/login'),
+        tooltip: 'Notifications',
+      );
+    }
+
+    final stream = FirebaseFirestore.instance
+        .collection('notifications')
+        .where('userId', isEqualTo: uid)
+        .orderBy('createdAt', descending: true)
+        .limit(20)
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (ctx, snap) {
+        if (!snap.hasData) {
+          return IconButton(icon: const Icon(Icons.notifications_none), onPressed: null, tooltip: 'Notifications');
+        }
+        final docs = snap.data!.docs;
+        final unreadCount = docs.where((d) => (d.data()['read'] as bool?) != true).length;
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.notifications),
+              onPressed: () async {
+                // Open a simple modal bottom sheet listing recent notifications
+                if (!ctx.mounted) return;
+                await showModalBottomSheet(
+                  context: ctx,
+                  builder: (sheetCtx) {
+                    return ListView.separated(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: docs.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (c, i) {
+                        final doc = docs[i];
+                        final data = doc.data();
+                        final title = data['title'] as String? ?? 'Notification';
+                        final body = data['body'] as String? ?? '';
+                        final read = (data['read'] as bool?) ?? false;
+                        return ListTile(
+                          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(body, maxLines: 2, overflow: TextOverflow.ellipsis),
+                          trailing: read ? null : Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: Colors.red, shape: BoxShape.circle), child: const SizedBox(width: 6, height: 6)),
+                          onTap: () async {
+                            Navigator.of(sheetCtx).pop();
+                            // mark as read (best-effort)
+                            try {
+                              await FirebaseFirestore.instance.collection('notifications').doc(doc.id).set({'read': true}, SetOptions(merge: true));
+                            } catch (_) {}
+                            await _navigateForNotification(ctx, data);
+                          },
+                        );
+                      },
+                    );
+                  },
+                );
+              },
+              tooltip: 'Notifications',
+            ),
+            if (unreadCount > 0)
+              Positioned(
+                right: 6,
+                top: 6,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(12)),
+                  constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+                  child: Center(
+                    child: Text(
+                      unreadCount > 99 ? '99+' : unreadCount.toString(),
+                      style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+

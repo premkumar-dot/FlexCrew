@@ -1,0 +1,15 @@
+{
+    "name": "FlexCrew",
+    "short_name": "FlexCrew",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#ffffff",
+    "icons": [
+        {
+            "src": "assets/branding/icon/flexcrew_icon_256.png",
+            "sizes": "256x256",
+            "type": "image/png"
+        }
+    ]
+}

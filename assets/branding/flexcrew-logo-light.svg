@@ -1,0 +1,8 @@
+@'
+<svg width="1024" height="256" viewBox="0 0 1024 256" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="256" fill="#0B2A3F"/>
+  <g font-family="Inter, Arial, sans-serif" font-weight="800" font-size="150" fill="#FFFFFF">
+    <text x="20" y="175">FlexCrew</text>
+  </g>
+</svg>
+'@ | Set-Content -Encoding utf8 assets/branding/flexcrew-logo-light.svg

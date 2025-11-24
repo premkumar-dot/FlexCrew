@@ -1,0 +1,11 @@
+@'
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="1024" height="1024" rx="180" fill="#0B2A3F"/>
+  <g transform="translate(240,320)">
+    <circle cx="120" cy="120" r="60" fill="#FF5A1F"/>
+    <circle cx="260" cy="85" r="85" fill="#FF5A1F"/>
+    <path d="M60,420 h200 a85,85 0 0 0 -85,-85 h-30 a85,85 0 0 0 -85,85z" fill="#FF5A1F"/>
+    <path d="M240,420 h220 a95,95 0 0 0 -95,-95 h-30 a95,95 0 0 0 -95,95z" fill="#FF5A1F"/>
+  </g>
+</svg>
+'@ | Set-Content -Encoding utf8 assets/branding/flexcrew-mark.svg

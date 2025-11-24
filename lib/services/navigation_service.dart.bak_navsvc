@@ -1,0 +1,26 @@
+﻿import 'package:go_router/go_router.dart';
+import 'package:flexcrew/routing/router_globals.dart';
+
+/// Minimal NavigationService that resolves the router from the root navigator key.
+/// Compatible with go_router v14+ (avoids using non-existent getters/params).
+class NavigationService {
+  NavigationService._();
+  static final NavigationService instance = NavigationService._();
+
+  GoRouter get _router {
+    final ctx = rootNavigatorKey.currentContext;
+    if (ctx == null) {
+      throw StateError(
+        'Router context not available — ensure MaterialApp.router uses navigatorKey: rootNavigatorKey.',
+      );
+    }
+    return GoRouter.of(ctx);
+  }
+
+  void push(String location, {Object? extra}) => _router.push(location, extra: extra);
+  void go(String location, {Object? extra}) => _router.go(location, extra: extra);
+
+  // Use extra for passing complex objects. go_router v14+ expects signature without params named arg here.
+  void pushNamed(String name, {Object? extra}) => _router.pushNamed(name, extra: extra);
+  void goNamed(String name, {Object? extra}) => _router.goNamed(name, extra: extra);
+}
