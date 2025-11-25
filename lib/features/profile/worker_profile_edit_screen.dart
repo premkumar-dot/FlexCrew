@@ -1,4 +1,4 @@
-// Worker profile edit screen - merged fields with inline country picker and avatar-with-name.
+﻿// Worker profile edit screen - merged fields with inline country picker and avatar-with-name.
 // Includes Preview and Save actions in AppBar. Persists to Firestore collection "workers".
 import 'dart:async';
 import 'dart:ui' as ui;
@@ -325,14 +325,10 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
             .collection(collectionName)
             .doc(_uid)
             .set(patch, SetOptions(merge: true))
-            // Before (problematic)
-            await someAsyncCall().timeout(Duration(seconds: 12));
 
-            // After (safe)
             await _withPlainTimeout(
-              someAsyncCall(),
               const Duration(seconds: 12),
-              'Network timeout — please try again',
+              'Network timeout â€” please try again',
             );
         // ignore: avoid_print
         print('STEP3.2: write completed');
