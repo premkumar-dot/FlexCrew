@@ -325,7 +325,15 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
             .collection(collectionName)
             .doc(_uid)
             .set(patch, SetOptions(merge: true))
-            .timeout(const Duration(seconds: 12));
+            // Before (problematic)
+            await someAsyncCall().timeout(Duration(seconds: 12));
+
+            // After (safe)
+            await _withPlainTimeout(
+              someAsyncCall(),
+              const Duration(seconds: 12),
+              'Network timeout — please try again',
+            );
         // ignore: avoid_print
         print('STEP3.2: write completed');
       } catch (e, st) {
@@ -426,7 +434,8 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    const brand = Color(0xFFFF6A00);
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimary;
 
     final displayNameForAvatar = _nameCtrl.text.trim().isNotEmpty
         ? _nameCtrl.text.trim()
@@ -437,8 +446,8 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
         // keep toolbarHeight so top-right avatar can show name without overflow
         toolbarHeight: 72,
         title: const Text('Edit profile'),
-        backgroundColor: brand,
-        foregroundColor: Colors.white,
+        backgroundColor: primary,
+        foregroundColor: onPrimary,
         elevation: 0.5,
         actions: [
           const NotificationBell(),
@@ -632,7 +641,7 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
                         Expanded(
                           child: ElevatedButton(
                             onPressed: (!_formReady || _saving) ? null : _save,
-                            style: ElevatedButton.styleFrom(backgroundColor: brand),
+                            style: ElevatedButton.styleFrom(backgroundColor: primary),
                             child: _saving ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Save'),
                           ),
                         ),
