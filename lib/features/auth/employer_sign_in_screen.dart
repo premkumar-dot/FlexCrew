@@ -6,9 +6,10 @@ class EmployerSignInScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const brand = Color(0xFFFF6A00);
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimary;
     return Scaffold(
-      appBar: AppBar(title: const Text('Employer sign in'), backgroundColor: brand),
+      appBar: AppBar(title: const Text('Employer sign in'), backgroundColor: primary, foregroundColor: onPrimary),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -16,7 +17,7 @@ class EmployerSignInScreen extends StatelessWidget {
             const Text('Sign in as an employer', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             const SizedBox(height: 16),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: brand),
+              style: ElevatedButton.styleFrom(backgroundColor: primary, foregroundColor: onPrimary),
               onPressed: () {
                 // Navigate to the shared login screen and provide role query param for prefill
                 context.go('/login?role=employer');

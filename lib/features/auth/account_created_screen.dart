@@ -8,6 +8,9 @@ class AccountCreatedScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimary;
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: Center(
@@ -39,8 +42,8 @@ class AccountCreatedScreen extends StatelessWidget {
                   child: ElevatedButton(
                     onPressed: () => context.go('/login'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFFF8C42),
-                      foregroundColor: Colors.white,
+                      backgroundColor: primary,
+                      foregroundColor: onPrimary,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(20),

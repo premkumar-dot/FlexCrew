@@ -7,6 +7,7 @@ import 'package:flexcrew/widgets/user_avatar_button.dart';
 import '../../services/storage_service.dart' as storage_service;
 import 'package:flexcrew/features/profile/employer_profile_review_screen.dart';
 import 'package:flexcrew/widgets/notification_bell.dart';
+import 'package:flexcrew/widgets/phone_field_with_flag.dart';
 
 class EmployerProfileEditScreen extends StatefulWidget {
   const EmployerProfileEditScreen({super.key});
@@ -30,6 +31,7 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
   String? _logoUrl;
   double _logoUploadProgress = 0.0;
   String? _uid;
+  String _phoneCountryIso = 'SG';
 
   @override
   void initState() {
@@ -82,7 +84,18 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
         },
       );
       setState(() => _logoUrl = url);
+      // Persist employer logo + mirror into users/{uid} and FirebaseAuth so AppBar avatar updates
       await FirebaseFirestore.instance.collection('employers').doc(_uid).set({'logoUrl': url, 'updatedAt': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(_uid).set({'photoUrl': url, 'updatedAt': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      } catch (_) {}
+      try {
+        final authUser = FirebaseAuth.instance.currentUser;
+        if (authUser != null) {
+          await authUser.updatePhotoURL(url);
+          await authUser.reload();
+        }
+      } catch (_) {}
     } catch (_) {
       // ignore
     } finally {
@@ -100,10 +113,17 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
     if (!_validateForm()) return;
     if (_uid == null) return;
     setState(() => _saving = true);
+    // Normalize phone before saving
+    String phoneNormalized = _phoneCtrl.text.trim();
+    if (phoneNormalized.isNotEmpty && !phoneNormalized.startsWith('+')) {
+      final digits = phoneNormalized.replaceAll(RegExp(r'[^0-9]'), '');
+      phoneNormalized = '+65$digits';
+    }
+
     final patch = {
       'companyName': _companyCtrl.text.trim(),
       'contactName': _contactCtrl.text.trim(),
-      'phone': _phoneCtrl.text.trim(),
+      'phone': phoneNormalized,
       'address': _addressCtrl.text.trim(),
       'postalCode': _postalCtrl.text.trim(),
       'website': _websiteCtrl.text.trim(),
@@ -114,6 +134,15 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
     try {
       await FirebaseFirestore.instance.collection('employers').doc(_uid).set(patch, SetOptions(merge: true));
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile saved')));
+      // Mirror into users collection
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(_uid).set({
+          'displayName': _contactCtrl.text.trim(),
+          'photoUrl': _logoUrl,
+          'phone': phoneNormalized,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } catch (_) {}
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
     } finally {
@@ -133,15 +162,28 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
     super.dispose();
   }
 
+  String _dialForIso(String isoCode) {
+    switch (isoCode) {
+      case 'SG':
+        return '+65';
+      case 'MY':
+        return '+60';
+      // Add more countries as needed
+      default:
+        return '';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    const brand = Color(0xFFFF6A00);
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimary;
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 72,
         title: const Text('Edit employer profile'),
-        backgroundColor: brand,
-        foregroundColor: Colors.white,
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
         elevation: 0.5,
         actions: [
           const NotificationBell(),
@@ -211,7 +253,14 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
               const SizedBox(height: 12),
               TextFormField(controller: _contactCtrl, decoration: const InputDecoration(labelText: 'Primary contact', border: OutlineInputBorder()), validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null),
               const SizedBox(height: 12),
-              TextFormField(controller: _phoneCtrl, decoration: const InputDecoration(labelText: 'Phone', border: OutlineInputBorder()), validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null),
+              PhoneFieldWithFlag(
+                controller: _phoneCtrl,
+                initialIso: _phoneCountryIso,
+                initialDial: _dialForIso(_phoneCountryIso),
+                onCountrySelected: (country) => setState(() => _phoneCountryIso = country.countryCode),
+                hintText: 'Phone',
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Required' : null,
+              ),
               const SizedBox(height: 12),
               TextFormField(controller: _addressCtrl, decoration: const InputDecoration(labelText: 'Address', border: OutlineInputBorder())),
               const SizedBox(height: 12),
@@ -224,7 +273,7 @@ class _EmployerProfileEditScreenState extends State<EmployerProfileEditScreen> {
               Row(children: [
                 Expanded(child: OutlinedButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel'))),
                 const SizedBox(width: 12),
-                Expanded(child: ElevatedButton(onPressed: _saving ? null : _save, style: ElevatedButton.styleFrom(backgroundColor: brand), child: _saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Save'))),
+                Expanded(child: ElevatedButton(onPressed: _saving ? null : _save, style: ElevatedButton.styleFrom(backgroundColor: primary), child: _saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Save'))),
               ]),
             ]),
           ),

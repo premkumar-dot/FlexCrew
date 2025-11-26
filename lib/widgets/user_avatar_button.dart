@@ -1,10 +1,13 @@
-// AppBar avatar + menu (stable PopupMenuButton).
+// AppBar avatar + menu (stable PopupMenuButton) — router-first navigation.
 // - Uses FirebaseAuth.currentUser.photoURL first, falls back to one-time Firestore lookup.
 // - Avatar + name shown inline in the AppBar; avatar is tappable and opens the menu.
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flexcrew/features/auth/sign_in_screen.dart';
+import 'package:flexcrew/routing/router_globals.dart' as rg;
+import 'package:flexcrew/services/user_role_service.dart';
 
 String _titleCase(String? input) {
   if (input == null) return '';
@@ -73,11 +76,25 @@ class UserAvatarButton extends StatefulWidget {
 class _UserAvatarButtonState extends State<UserAvatarButton> {
   String? _fallbackPhoto;
   String? _fallbackName;
+  String? _fallbackRole;
+  StreamSubscription<User?>? _authSub;
+  // small local hint used for building the menu quickly; authoritative role should come from UserRoleService
+  String? _hintRole;
 
   @override
   void initState() {
     super.initState();
     _loadFallback();
+    // Rebuild when Firebase Auth user changes so photoURL/displayName updates immediately
+    _authSub = FirebaseAuth.instance.userChanges().listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadFallback() async {
@@ -89,6 +106,7 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
       if (usersData != null) {
         _fallbackName ??= _resolveNameFromDoc(usersData);
         _fallbackPhoto ??= (usersData['photoUrl'] ?? usersData['avatarUrl'] ?? usersData['photo'] ?? usersData['imageUrl']) as String?;
+        _fallbackRole ??= (usersData['role'] as String?)?.trim();
       }
 
       if ((_fallbackPhoto == null || _fallbackName == null)) {
@@ -112,6 +130,13 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
       // ignore network errors
     }
     if (mounted) setState(() {});
+    // also pre-warm cached role from the role service if not set
+    try {
+      final role = await UserRoleService.instance.getRole();
+      if (mounted && role != null) {
+        setState(() => _hintRole = role);
+      }
+    } catch (_) {}
   }
 
   Widget _avatar(double radius, String displayName, String? photoUrl) {
@@ -142,28 +167,113 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
 
   void _onSelected(String value) async {
     try {
+      // telemetry: selected action
+      debugPrint('AvatarMenu: selected=$value');
       switch (value) {
         case 'home':
-          Navigator.of(context).pushNamedAndRemoveUntil('/home', (r) => false);
+          {
+            // Resolve role via service (cached + safe fetch)
+            String role = _hintRole ?? '';
+            try {
+              final svcRole = await UserRoleService.instance.getRole(refresh: false);
+              if (svcRole != null && svcRole.trim().isNotEmpty) role = svcRole.trim();
+            } catch (_) {}
+
+            debugPrint('AvatarMenu: routing home for role="$role"');
+            if (role.toLowerCase() == 'employer') {
+              try {
+                rg.appRouter.go('/employer');
+              } catch (_) {
+                Navigator.of(context).pushNamedAndRemoveUntil('/employer', (r) => false);
+              }
+            } else {
+              try {
+                rg.appRouter.go('/worker');
+              } catch (_) {
+                Navigator.of(context).pushNamedAndRemoveUntil('/worker', (r) => false);
+              }
+            }
+          }
           break;
         case 'wallet':
-          Navigator.of(context).pushNamed('/wallet');
+          {
+            String role = _hintRole ?? '';
+            try {
+              final svcRole = await UserRoleService.instance.getRole(refresh: false);
+              if (svcRole != null && svcRole.trim().isNotEmpty) role = svcRole.trim();
+            } catch (_) {}
+            debugPrint('AvatarMenu: routing wallet for role="$role"');
+            if (role.toLowerCase() == 'employer') {
+              try {
+                rg.appRouter.go('/employer/wallet');
+              } catch (_) {
+                Navigator.of(context).pushNamed('/employer/wallet');
+              }
+            } else {
+              try {
+                rg.appRouter.go('/worker/wallet');
+              } catch (_) {
+                Navigator.of(context).pushNamed('/worker/wallet');
+              }
+            }
+          }
+          break;
+        case 'post_vacancy':
+          try {
+            debugPrint('AvatarMenu: post_vacancy tapped');
+            rg.appRouter.pushNamed('vacancy-create');
+          } catch (_) {
+            Navigator.of(context).pushNamed('/employer/vacancy/new');
+          }
           break;
         case 'profile':
-          Navigator.of(context).pushNamed('/profile/edit');
+          // Resolve persisted role and navigate to the appropriate profile edit
+          try {
+            final uid = FirebaseAuth.instance.currentUser?.uid;
+            String role = '';
+            if (uid != null) {
+              try {
+                final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+                role = (doc.data()?['role'] as String?) ?? '';
+              } catch (_) {}
+            }
+            if (role.trim().toLowerCase() == 'employer') {
+              try {
+                rg.appRouter.go('/employer/profile/edit');
+              } catch (_) {
+                Navigator.of(context).pushNamed('/employer/profile/edit');
+              }
+            } else {
+              try {
+                rg.appRouter.go('/worker/profile/edit');
+              } catch (_) {
+                Navigator.of(context).pushNamed('/worker/profile/edit');
+              }
+            }
+          } catch (e) {
+            rethrow;
+          }
           break;
         case 'settings':
-          Navigator.of(context).pushNamed('/settings');
+          try {
+            rg.appRouter.go('/settings');
+          } catch (_) {
+            Navigator.of(context).pushNamed('/settings');
+          }
           break;
         case 'logout':
           await FirebaseAuth.instance.signOut();
-          Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SignInScreen()), (r) => false);
+          try {
+            rg.appRouter.go('/login');
+          } catch (_) {
+            Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SignInScreen()), (r) => false);
+          }
           break;
       }
     } catch (e) {
       // ignore: avoid_print
       print('Avatar menu navigation error: $e');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Navigation failed: ${e.toString()}')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Navigation Failed: ${e.toString()}')));
     }
   }
 

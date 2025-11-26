@@ -81,7 +81,7 @@ class _UploadTileState extends State<UploadTile> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('${widget.label} uploaded.'),
-            backgroundColor: const Color(0xFFFF6A00), // Orange
+            backgroundColor: Theme.of(context).colorScheme.primary, // use theme
             duration: const Duration(seconds: 2),
           ),
         );

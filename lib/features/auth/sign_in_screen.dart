@@ -1,4 +1,4 @@
-﻿// (updated) SignInScreen accepts optional role, persists a normalized role to users/{uid},
+// (updated) SignInScreen accepts optional role, persists a normalized role to users/{uid},
 // and delegates final navigation to navigateToPersistedRole(...)
 import 'dart:async';
 
@@ -11,6 +11,9 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flexcrew/utils/nav_helpers.dart';
 import 'package:flexcrew/services/navigation_service.dart';
+import 'package:flexcrew/features/auth/create_account_screen.dart';
+import 'package:flexcrew/routing/router_globals.dart' as rg;
+
 class SignInScreen extends StatefulWidget {
   const SignInScreen({super.key, this.role});
 
@@ -104,6 +107,10 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
+  // NOTE:
+  // Role persistence has been moved out of sign-in flows.
+  // Role is set explicitly during account creation and onboarding only.
+  // This prevents accidental role overwrites when users toggle the role UI.
   Future<void> _persistRoleForUid(String uid) async {
     final normalized = _normalizeRole(_selectedRole);
     try {
@@ -128,10 +135,7 @@ class _SignInScreenState extends State<SignInScreen> {
         } else if (!_rememberEmail) {
           await _removeSavedEmail();
         }
-        // persist role to users/{uid}
-        final uid = userCred.user?.uid;
-        if (uid != null) await _persistRoleForUid(uid);
-
+        // Do NOT overwrite stored role on normal sign-in.
         // Delegate final navigation to centralized helper that reads users/{uid}.role
         await navigateToPersistedRole(context, fallback: 'worker');
       }
@@ -162,10 +166,7 @@ class _SignInScreenState extends State<SignInScreen> {
       }
       if (!mounted) return;
 
-      // persist role to users/{uid}
-      final uid = cred.user?.uid;
-      if (uid != null) await _persistRoleForUid(uid);
-
+      // Do NOT overwrite stored role on normal sign-in.
       // Delegate final navigation to centralized helper that reads users/{uid}.role
       await navigateToPersistedRole(context, fallback: 'worker');
     } on FirebaseAuthException catch (e) {
@@ -215,7 +216,28 @@ class _SignInScreenState extends State<SignInScreen> {
   }
 
   void _onCreateAccountPressed() {
-    GoRouter.of(context).pushNamed('create-account', extra: {'role': _selectedRole});
+    // Prefer global appRouter to avoid "No GoRouter found in context" errors when
+    // the current context is outside MaterialApp.router (dialogs, overlays, etc.).
+    try {
+      rg.appRouter.pushNamed('create-account', extra: {'role': _selectedRole});
+      return;
+    } catch (_) {}
+    // Fallback to NavigationService which resolves rg.appRouter internally.
+    try {
+      NavigationService.instance.pushNamed('create-account', extra: {'role': _selectedRole});
+      return;
+    } catch (_) {}
+    // Final fallback: local Navigator push (should always work).
+    try {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CreateAccountScreen(
+            prefillEmail: _emailCtl.text.isNotEmpty ? _emailCtl.text : null,
+            role: _selectedRole,
+          ),
+        ),
+      );
+    } catch (_) {}
   }
 
   Widget _googleIcon() {
@@ -404,6 +426,7 @@ class _SignInScreenState extends State<SignInScreen> {
     );
   }
 }
+
 
 
 

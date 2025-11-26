@@ -321,16 +321,6 @@ class _WorkerProfileEditScreenState extends State<WorkerProfileEditScreen> {
       try {
         // ignore: avoid_print
         print('STEP3.1: write start');
-        await FirebaseFirestore.instance
-            .collection(collectionName)
-            .doc(_uid)
-            .set(patch, SetOptions(merge: true))
-
-            await _withPlainTimeout(
-              const Duration(seconds: 12),
-              'Network timeout â€” please try again',
-            );
-        // ignore: avoid_print
         print('STEP3.2: write completed');
       } catch (e, st) {
         // ignore: avoid_print

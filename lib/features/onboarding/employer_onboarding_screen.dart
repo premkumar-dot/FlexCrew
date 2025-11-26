@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flexcrew/widgets/phone_field_with_flag.dart';
 
 class EmployerOnboardingScreen extends StatefulWidget {
   const EmployerOnboardingScreen({super.key});
@@ -13,6 +16,7 @@ class _EmployerOnboardingScreenState extends State<EmployerOnboardingScreen> {
   final _contactCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
   bool _agreed = false;
+  String _phoneCountryIso = 'SG';
 
   @override
   void dispose() {
@@ -22,30 +26,92 @@ class _EmployerOnboardingScreenState extends State<EmployerOnboardingScreen> {
     super.dispose();
   }
 
+  String _normalizePhone(String raw, String iso) {
+    final txt = raw.trim();
+    if (txt.isEmpty) return '';
+    if (txt.startsWith('+')) return txt;
+    final digits = txt.replaceAll(RegExp(r'[^0-9]'), '');
+    final dial = iso == 'SG' ? '65' : (iso == 'US' ? '1' : '65');
+    return '+$dial$digits';
+  }
+
   void _next() {
     if (_companyCtrl.text.trim().isEmpty || _contactCtrl.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill company and contact')));
       return;
     }
-    // For onboarding finish, jump to employer home or profile edit
-    context.go('/employer/profile/edit');
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Not signed in')));
+      return;
+    }
+
+    final phoneNormalized = _normalizePhone(_phoneCtrl.text.trim(), _phoneCountryIso);
+
+    final data = {
+      'companyName': _companyCtrl.text.trim(),
+      'contactName': _contactCtrl.text.trim(),
+      'phone': phoneNormalized,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    FirebaseFirestore.instance.collection('employers').doc(uid).set(data, SetOptions(merge: true)).catchError((_) {});
+
+    FirebaseFirestore.instance.collection('users').doc(uid).set({
+      'role': 'employer',
+      'onboardingComplete': true,
+      'displayName': _contactCtrl.text.trim(),
+      'phone': phoneNormalized,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError((_) {});
+
+    try {
+      context.go('/employer/profile/edit');
+    } catch (_) {
+      Navigator.of(context).pushReplacementNamed('/employer/profile/edit');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    const brand = Color(0xFFFF6A00);
+    final primary = Theme.of(context).colorScheme.primary;
     return Scaffold(
-      appBar: AppBar(title: const Text('Employer Onboarding'), backgroundColor: brand),
+      appBar: AppBar(title: const Text('Employer Onboarding'), backgroundColor: primary),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          const Text('Welcome — Employer', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          Text('Welcome â€” Employer', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 12),
-          TextFormField(controller: _companyCtrl, decoration: const InputDecoration(labelText: 'Company name', border: OutlineInputBorder())),
+          TextFormField(
+            controller: _companyCtrl,
+            decoration: InputDecoration(
+              labelText: 'Company name',
+              border: const OutlineInputBorder(),
+              filled: true,
+              fillColor: Theme.of(context).colorScheme.surface,
+            ),
+          ),
           const SizedBox(height: 12),
-          TextFormField(controller: _contactCtrl, decoration: const InputDecoration(labelText: 'Primary contact name', border: OutlineInputBorder())),
+          TextFormField(
+            controller: _contactCtrl,
+            decoration: InputDecoration(
+              labelText: 'Primary contact name',
+              border: const OutlineInputBorder(),
+              filled: true,
+              fillColor: Theme.of(context).colorScheme.surface,
+            ),
+          ),
           const SizedBox(height: 12),
-          TextFormField(controller: _phoneCtrl, decoration: const InputDecoration(labelText: 'Contact phone', border: OutlineInputBorder())),
+          PhoneFieldWithFlag(
+            controller: _phoneCtrl,
+            initialIso: _phoneCountryIso,
+            initialDial: _dialForIso(_phoneCountryIso),
+            onCountrySelected: (country) => setState(() => _phoneCountryIso = country.countryCode),
+            hintText: 'Contact phone',
+            validator: (v) => null,
+          ),
           const SizedBox(height: 12),
           CheckboxListTile(
             value: _agreed,
@@ -54,12 +120,27 @@ class _EmployerOnboardingScreenState extends State<EmployerOnboardingScreen> {
           ),
           const SizedBox(height: 16),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: brand),
+            style: ElevatedButton.styleFrom(backgroundColor: primary),
             onPressed: _agreed ? _next : null,
             child: const Padding(padding: EdgeInsets.symmetric(vertical: 14), child: Text('Continue')),
           ),
         ]),
       ),
     );
+  }
+
+  String _dialForIso(String iso) {
+    switch (iso) {
+      case 'US':
+        return '+1';
+      case 'MY':
+        return '+60';
+      case 'PH':
+        return '+63';
+      case 'IN':
+        return '+91';
+      default:
+        return '+65';
+    }
   }
 }

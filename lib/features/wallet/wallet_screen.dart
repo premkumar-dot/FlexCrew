@@ -5,7 +5,7 @@ import 'package:flexcrew/widgets/user_avatar_button.dart';
 import 'package:flexcrew/widgets/notification_bell.dart';
 
 /// Compatibility wrapper used by the router.
-/// Routes reference `WalletScreen(role: 'crew'|'employer')` — provide that API
+/// Routes reference `WalletScreen(role: 'crew'|'employer')` â€” provide that API
 /// while reusing the existing WorkerWalletScreen implementation.
 class WalletScreen extends StatelessWidget {
   final String role;
@@ -129,7 +129,7 @@ class _WorkerWalletScreenState extends State<WorkerWalletScreen> {
 
             return ListTile(
               leading: Icon(type == 'credit' || type == 'deposit' ? Icons.arrow_downward : Icons.arrow_upward, color: type == 'credit' ? Colors.green : Colors.orange),
-              title: Text('${type[0].toUpperCase()}${type.substring(1)} – \$${amount.toStringAsFixed(2)}'),
+              title: Text('${type[0].toUpperCase()}${type.substring(1)} â€” \$${amount.toStringAsFixed(2)}'),
               subtitle: created != null ? Text('${created.toLocal()}') : null,
               trailing: trailingWidget,
             );
@@ -141,11 +141,13 @@ class _WorkerWalletScreenState extends State<WorkerWalletScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+
     if (_uid.isEmpty) {
       return Scaffold(
         appBar: AppBar(
           title: const Text('Wallet'),
-          backgroundColor: const Color(0xFFFF6A00),
+          backgroundColor: primary,
           toolbarHeight: 72,
           actions: const [NotificationBell(), UserAvatarButton()],
         ),
@@ -158,7 +160,7 @@ class _WorkerWalletScreenState extends State<WorkerWalletScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Wallet'),
-        backgroundColor: const Color(0xFFFF6A00),
+        backgroundColor: primary,
         toolbarHeight: 72,
         actions: const [NotificationBell(), UserAvatarButton()],
       ),

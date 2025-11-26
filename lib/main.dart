@@ -7,19 +7,20 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 
 import 'widgets/web_style_splash.dart';
-import 'features/home/worker_home.dart';
-import 'features/conversations/conversations.dart';
-import 'features/auth/sign_in_screen.dart';
 import 'theme/app_theme.dart';
-import 'features/wallet/wallet_screen.dart';
-import 'features/profile/edit_profile_screen.dart';
-import 'features/settings/settings_screen.dart';
+
+// Router: use the app router and set the global router variable
+import 'routing/app_router.dart' as ar;
+import 'routing/router_globals.dart' as rg;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Ensure the global router reference is assigned before the app starts.
+  rg.appRouter = ar.appRouter;
 
   runApp(const MyApp());
 }
@@ -29,11 +30,11 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Use the centralized AppTheme so all widgets follow the brand orange color
-    return MaterialApp(
+    return MaterialApp.router(
       title: 'FlexCrew',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
+      routerConfig: ar.appRouter,
       builder: (context, child) {
         return Stack(
           children: [
@@ -41,25 +42,6 @@ class MyApp extends StatelessWidget {
             if (kIsWeb) const WebStyleSplash(),
           ],
         );
-      },
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
-          }
-          if (!snap.hasData) {
-            return const SignInScreen();
-          }
-          return const WorkerHomeScreen();
-        },
-      ),
-      routes: {
-        '/home': (_) => const WorkerHomeScreen(),
-        '/conversations': (_) => const ConversationsListScreen(),
-        '/wallet': (_) => const WalletScreen(role: 'crew'),
-        '/profile/edit': (_) => const EditProfileScreen(),
-        '/settings': (_) => const SettingsScreen(),
       },
     );
   }

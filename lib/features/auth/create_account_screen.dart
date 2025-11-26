@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flexcrew/routing/router_globals.dart' as rg;
+import 'package:flexcrew/features/onboarding/worker_onboarding_screen.dart';
 
 class CreateAccountScreen extends StatefulWidget {
   const CreateAccountScreen({super.key, this.prefillEmail, this.role});
@@ -56,6 +58,16 @@ class _CreateAccountScreenState extends State<CreateAccountScreen> {
       );
 
       final uid = userCred.user?.uid;
+      // Ensure FirebaseAuth user has a displayName (used by onboarding)
+      try {
+        final authUser = userCred.user;
+        if (authUser != null) {
+          await authUser.updateDisplayName(_displayName.text.trim());
+          // Force reload so FirebaseAuth.currentUser reflects the change
+          await authUser.reload();
+        }
+      } catch (_) {}
+
       if (uid != null) {
         final normalizedRole = _normalizeRole(widget.role);
         await FirebaseFirestore.instance.collection('users').doc(uid).set({
@@ -65,12 +77,21 @@ class _CreateAccountScreenState extends State<CreateAccountScreen> {
           'createdAt': FieldValue.serverTimestamp(),
           'onboardingComplete': false,
         }, SetOptions(merge: true));
+
+        // Navigate to onboarding and pass prefill data via router extras
+        try {
+          rg.appRouter.pushNamed('onboarding', extra: {'prefillName': _displayName.text.trim(), 'uid': uid});
+          return;
+        } catch (_) {}
+        // Fallback navigator push with constructor args
+        Navigator.of(context).push(MaterialPageRoute(builder: (_) => WorkerOnboardingScreen(prefillName: _displayName.text.trim(), prefillUid: uid)));
+        return;
       }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account created')));
 
-      // Optionally navigate to onboarding based on selected role
+      // Optionally navigate to onboarding based on selected role (only reach here if navigation above didn't run)
       if (widget.role == 'employer') {
         // Use go_router to navigate (push) so named route handling works
         context.push('/employer/onboarding');

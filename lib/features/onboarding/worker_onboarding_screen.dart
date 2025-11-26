@@ -1,4 +1,4 @@
-// Worker onboarding – full Stepper UI with country selector, document/avatar upload.
+// Worker onboarding â€“ full Stepper UI with country selector, document/avatar upload.
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -8,6 +8,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:flexcrew/widgets/phone_field_with_flag.dart';
 import 'package:flexcrew/widgets/avatar_with_name.dart';
 import 'package:flexcrew/widgets/notification_bell.dart';
@@ -15,7 +16,10 @@ import 'package:phone_numbers_parser/phone_numbers_parser.dart';
 import '../../services/storage_service.dart' as storage_service;
 
 class WorkerOnboardingScreen extends StatefulWidget {
-  const WorkerOnboardingScreen({super.key});
+  const WorkerOnboardingScreen({super.key, this.prefillName, this.prefillUid});
+
+  final String? prefillName;
+  final String? prefillUid;
 
   @override
   State<WorkerOnboardingScreen> createState() => _WorkerOnboardingScreenState();
@@ -116,10 +120,32 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
     _phoneCountryIso = (localeCountry != null && localeCountry.isNotEmpty) ? localeCountry : 'SG';
     _ecCountryIso = _phoneCountryIso;
 
+    // Prefill name if passed from create-account flow
+    if (widget.prefillName != null && widget.prefillName!.isNotEmpty) {
+      _nameCtrl.text = widget.prefillName!;
+    }
+
+    // Immediately prefer currentUser if present
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
       _nameCtrl.text = user.displayName ?? (user.email?.split('@').first ?? '');
     }
+
+    // Listen for auth state changes and update name when auth becomes available
+    FirebaseAuth.instance.authStateChanges().listen((u) {
+      if (u != null) {
+        final name = u.displayName ?? (u.email?.split('@').first ?? '');
+        if (name.isNotEmpty && mounted) setState(() => _nameCtrl.text = name);
+      } else {
+        // If not signed in, try to read users/{prefillUid} as a fallback
+        if (widget.prefillUid != null) {
+          FirebaseFirestore.instance.collection('users').doc(widget.prefillUid).get().then((doc) {
+            final dn = doc.data()?['displayName'] as String?;
+            if (dn != null && dn.isNotEmpty && mounted) setState(() => _nameCtrl.text = dn);
+          }).catchError((_) {});
+        }
+      }
+    });
 
     _nameCtrl.addListener(() {
       if (mounted) setState(() {});
@@ -180,6 +206,19 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
     return '+$dial$digits';
   }
 
+  Future<String?> _resolvedUid() async {
+    var uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null && widget.prefillUid != null) {
+      // try reload currentUser first (best-effort)
+      try {
+        final cur = FirebaseAuth.instance.currentUser;
+        if (cur != null) await cur.reload();
+      } catch (_) {}
+      uid = FirebaseAuth.instance.currentUser?.uid ?? widget.prefillUid;
+    }
+    return uid;
+  }
+
   Future<void> _pickDob() async {
     final now = DateTime.now();
     final initial = _dob ?? DateTime(now.year - 25, now.month, now.day);
@@ -192,13 +231,14 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
     if (picked != null && mounted) {
       setState(() {
         _dob = picked;
-        _dobCtl.text = "${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}";
+        // Display date in dd-MMM-yyyy (02-Jan-2020)
+        _dobCtl.text = DateFormat('dd-MMM-yyyy').format(picked);
       });
     }
   }
 
   Future<void> _pickDocumentAndUpload(String key) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = await _resolvedUid();
     if (uid == null) {
       _toast('Not signed in.');
       return;
@@ -248,7 +288,7 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
   }
 
   Future<void> _uploadAvatar() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = await _resolvedUid();
     if (uid == null) {
       _toast('Not signed in.');
       return;
@@ -279,9 +319,17 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
           if (mounted) setState(() => _avatarUploadProgress = p);
         },
       );
-      setState(() => _avatarUrl = url);
+      if (mounted) setState(() => _avatarUrl = url);
+      // Persist avatar to users/{uid} and also update FirebaseAuth.currentUser.photoURL
       try {
         await FirebaseFirestore.instance.collection('users').doc(uid).set({'photoUrl': url, 'updatedAt': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      } catch (_) {}
+      try {
+        final authUser = FirebaseAuth.instance.currentUser;
+        if (authUser != null) {
+          await authUser.updatePhotoURL(url);
+          await authUser.reload();
+        }
       } catch (_) {}
       _toast('Avatar uploaded.');
     } catch (e) {
@@ -309,8 +357,8 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
       return;
     }
 
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
+    final uid = await _resolvedUid();
+    if (uid == null) {
       _toast('Not signed in.');
       return;
     }
@@ -326,8 +374,8 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
       final finalSkills = _skills == 'Others' ? _otherSkillsCtrl.text.trim() : _skills;
 
       final data = {
-        'uid': user.uid,
-        'email': user.email,
+        'uid': uid,
+        'email': FirebaseAuth.instance.currentUser?.email,
         'name': _nameCtrl.text.trim(),
         'phone': phoneE164,
         'whatsapp': whatsappE164,
@@ -352,8 +400,18 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
         'resumeUrl': _docUrls['resumeUrl'],
       };
 
-      await FirebaseFirestore.instance.collection('workers').doc(user.uid).set(data, SetOptions(merge: true));
+      await FirebaseFirestore.instance.collection('workers').doc(uid).set(data, SetOptions(merge: true));
 
+      // Explicitly set role -> worker in users/{uid} so role is set only from onboarding flows
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({
+          'role': 'worker',
+          'onboardingComplete': true,
+          'displayName': _nameCtrl.text.trim(),
+          'phone': phoneE164,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } catch (_) {}
       _toast('Onboarding saved.');
       await Future.delayed(const Duration(milliseconds: 500));
       if (mounted) {
@@ -377,7 +435,8 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    const brand = Color(0xFFFF6A00);
+    final primary = Theme.of(context).colorScheme.primary;
+    final onPrimary = Theme.of(context).colorScheme.onPrimary;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -412,8 +471,8 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
                 if (!isLast) ...[
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: brand,
-                      foregroundColor: Colors.white,
+                      backgroundColor: primary,
+                      foregroundColor: onPrimary,
                       shape: const StadiumBorder(),
                       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
@@ -435,7 +494,7 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
                   ],
                   Expanded(
                     child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: brand, foregroundColor: Colors.white, shape: const StadiumBorder(), padding: const EdgeInsets.symmetric(vertical: 14)),
+                      style: ElevatedButton.styleFrom(backgroundColor: primary, foregroundColor: onPrimary, shape: const StadiumBorder(), padding: const EdgeInsets.symmetric(vertical: 14)),
                       onPressed: _submitting ? null : _submit,
                       child: _submitting
                           ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2.2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
@@ -616,7 +675,7 @@ class _WorkerOnboardingScreenState extends State<WorkerOnboardingScreen> {
                     onPressed: _submitting ? null : _submit,
                     icon: const Icon(Icons.check),
                     label: _submitting ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Confirm & Submit'),
-                    style: ElevatedButton.styleFrom(backgroundColor: brand, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14)),
+                    style: ElevatedButton.styleFrom(backgroundColor: primary, foregroundColor: onPrimary, padding: const EdgeInsets.symmetric(vertical: 14)),
                   ),
                 ],
               ),

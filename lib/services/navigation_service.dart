@@ -1,22 +1,17 @@
-﻿import 'package:go_router/go_router.dart';
-import 'package:flexcrew/routing/router_globals.dart';
+// Minimal NavigationService compatible with go_router v14+.
+// Uses the global `rg.appRouter` instance (router-first).
+import 'package:go_router/go_router.dart';
+import 'package:flexcrew/routing/router_globals.dart' as rg;
 
 /// Minimal NavigationService compatible with go_router v14+.
-/// Prefers the global `appRouter` and falls back to resolving the router
-/// from `rootNavigatorKey.currentContext`.
+/// Uses the global `rg.appRouter` instance (router-first).
 class NavigationService {
   NavigationService._();
   static final NavigationService instance = NavigationService._();
 
   GoRouter? get _maybeRouter {
-    // Prefer the global router instance when available (router-first).
     try {
-      return appRouter;
-    } catch (_) {}
-    final ctx = rootNavigatorKey.currentContext;
-    if (ctx == null) return null;
-    try {
-      return GoRouter.of(ctx);
+      return rg.appRouter;
     } catch (_) {
       return null;
     }
@@ -42,3 +37,4 @@ class NavigationService {
     if (r != null) r.goNamed(name, extra: extra);
   }
 }
+

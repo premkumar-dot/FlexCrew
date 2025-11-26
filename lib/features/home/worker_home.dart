@@ -1,6 +1,5 @@
-// Worker Home with improved vacancy cards showing employer avatar/name,
-// description, date/time, location, dress code, rate, slots, deadline and an Apply flow.
-// Employer profiles are loaded in batches for visible vacancies to reduce per-card reads.
+// Worker home: Open Vacancies / My Applications with apply flow and employer batch lookups.
+// Simplified to use DefaultTabController to avoid TabController lifecycle issues.
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -10,80 +9,46 @@ import '../../widgets/user_avatar_button.dart';
 import '../../services/application_service.dart';
 import 'vacancy_detail.dart';
 
-/// Worker Home with:
-///  • AppBar avatar menu (Wallet / Profile / Logout)
-///  • Tabs: Open Vacancies / My Applications
-///  • Apply to a vacancy -> creates `applications` doc (status: pending)
-class WorkerHomeScreen extends StatefulWidget {
+class WorkerHomeScreen extends StatelessWidget {
   const WorkerHomeScreen({super.key});
 
   @override
-  State<WorkerHomeScreen> createState() => _WorkerHomeScreenState();
-}
-
-class _WorkerHomeScreenState extends State<WorkerHomeScreen>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabs;
-  final _auth = FirebaseAuth.instance;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabs = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabs.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    // Use theme colors so AppBar follows the app theme (primary / onPrimary).
     final appBarBg = Theme.of(context).colorScheme.primary;
     final appBarFg = Theme.of(context).colorScheme.onPrimary;
 
-    return Scaffold(
-      appBar: AppBar(
-        // Allow space for avatar + name without overflow
-        toolbarHeight: 72,
-        title: const Text('FlexCrew – Crew'),
-        backgroundColor: appBarBg,
-        foregroundColor: appBarFg,
-        actions: [
-          // keep non-const so it rebuilds with proper context/resolved names
-          UserAvatarButton(),
-        ],
-        bottom: TabBar(
-          controller: _tabs,
-          // Use theme's onPrimary for indicator/labels so contrast is correct
-          indicatorColor: appBarFg,
-          labelColor: appBarFg,
-          unselectedLabelColor: appBarFg.withOpacity(.75),
-          tabs: const [
-            Tab(text: 'Open Vacancies'),
-            Tab(text: 'My Applications'),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          toolbarHeight: 72,
+          title: const Text('FlexCrew - Crew'),
+          backgroundColor: appBarBg,
+          foregroundColor: appBarFg,
+          actions: const [UserAvatarButton()],
+          bottom: TabBar(
+            indicatorColor: appBarFg,
+            labelColor: appBarFg,
+            unselectedLabelColor: appBarFg.withOpacity(.75),
+            tabs: const [
+              Tab(text: 'Open Vacancies'),
+              Tab(text: 'My Applications'),
+            ],
+          ),
+        ),
+        body: const TabBarView(
+          children: [
+            _OpenVacancies(),
+            _MyApplications(),
           ],
         ),
-      ),
-      body: TabBarView(
-        controller: _tabs,
-        children: [
-          _OpenVacancies(
-            onApplied: () => _tabs.animateTo(1),
-          ),
-          const _MyApplications(),
-        ],
       ),
     );
   }
 }
 
 class _OpenVacancies extends StatefulWidget {
-  const _OpenVacancies({required this.onApplied});
-
-  final VoidCallback onApplied;
+  const _OpenVacancies();
 
   @override
   State<_OpenVacancies> createState() => _OpenVacanciesState();
@@ -93,40 +58,33 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
   final _auth = FirebaseAuth.instance;
   final _db = FirebaseFirestore.instance;
   final _appSvc = ApplicationService();
-  final Set<String> _optimisticRemoved = {};
 
-  // In-memory cache: employerId -> { 'name': String?, 'avatar': String? }
+  final Set<String> _optimisticRemoved = {};
   final Map<String, Map<String, String?>> _employerCache = {};
-  // ids currently being loaded (to avoid duplicate batch requests)
   final Set<String> _loadingEmployerIds = {};
 
   static final _dateFmt = DateFormat.yMMMd();
   static final _dateTimeFmt = DateFormat.yMMMd().add_jm();
 
-  // Batch load employers in chunks (Firestore whereIn limit = 10)
-  Future<void> _batchLoadEmployers(List<String> employerIds) async {
-    final idsToLoad = employerIds.where((id) => id.isNotEmpty && !_employerCache.containsKey(id) && !_loadingEmployerIds.contains(id)).toList();
-    if (idsToLoad.isEmpty) return;
-
-    for (final id in idsToLoad) _loadingEmployerIds.add(id);
+  Future<void> _batchLoadEmployers(List<String> ids) async {
+    final toLoad = ids.where((id) => id.isNotEmpty && !_employerCache.containsKey(id) && !_loadingEmployerIds.contains(id)).toList();
+    if (toLoad.isEmpty) return;
+    for (final id in toLoad) _loadingEmployerIds.add(id);
 
     try {
       const chunkSize = 10;
-      for (var i = 0; i < idsToLoad.length; i += chunkSize) {
-        final chunk = idsToLoad.skip(i).take(chunkSize).toList();
+      for (var i = 0; i < toLoad.length; i += chunkSize) {
+        final chunk = toLoad.skip(i).take(chunkSize).toList();
         if (chunk.isEmpty) continue;
 
-        // helper to extract name/avatar from a doc
-        void _processDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+        final qUsers = await _db.collection('users').where(FieldPath.documentId, whereIn: chunk).get();
+        final qEmployers = await _db.collection('employers').where(FieldPath.documentId, whereIn: chunk).get();
+        final qProfiles = await _db.collection('profiles').where(FieldPath.documentId, whereIn: chunk).get();
+
+        void process(DocumentSnapshot<Map<String, dynamic>> doc) {
           final d = doc.data() ?? {};
           final name = (d['name'] ?? d['displayName'] ?? d['fullName'] ?? d['companyName']) as String?;
-          final avatar = (d['avatarUrl'] ??
-                  d['photoUrl'] ??
-                  d['logoUrl'] ??
-                  d['imageUrl'] ??
-                  d['photo'] ??
-                  d['logo'])
-              as String?;
+          final avatar = (d['avatarUrl'] ?? d['photoUrl'] ?? d['logoUrl'] ?? d['imageUrl'] ?? d['photo'] ?? d['logo']) as String?;
           final existing = _employerCache[doc.id];
           _employerCache[doc.id] = {
             'name': (name?.trim().isNotEmpty == true ? name : existing?['name'])?.toString(),
@@ -135,15 +93,9 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
           _loadingEmployerIds.remove(doc.id);
         }
 
-        // Query users, employers, profiles
-        final qUsers = await _db.collection('users').where(FieldPath.documentId, whereIn: chunk).get();
-        for (final doc in qUsers.docs) _processDoc(doc);
-
-        final qEmployers = await _db.collection('employers').where(FieldPath.documentId, whereIn: chunk).get();
-        for (final doc in qEmployers.docs) _processDoc(doc);
-
-        final qProfiles = await _db.collection('profiles').where(FieldPath.documentId, whereIn: chunk).get();
-        for (final doc in qProfiles.docs) _processDoc(doc);
+        for (final d in qUsers.docs) process(d);
+        for (final d in qEmployers.docs) process(d);
+        for (final d in qProfiles.docs) process(d);
 
         for (final id in chunk) {
           if (!_employerCache.containsKey(id)) {
@@ -154,9 +106,8 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
       }
 
       if (mounted) setState(() {});
-    } catch (e) {
-      for (final id in idsToLoad) _loadingEmployerIds.remove(id);
-      // silent
+    } catch (_) {
+      for (final id in toLoad) _loadingEmployerIds.remove(id);
     }
   }
 
@@ -164,252 +115,124 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return;
     final employerId = vacancyData['employerId'] as String?;
+    debugPrint('APPLY START: vacancy=$vacancyId worker=$uid employer=$employerId');
+
+    final dup = await _db.collection('applications').where('vacancyId', isEqualTo: vacancyId).where('workerId', isEqualTo: uid).limit(1).get();
+    if (dup.docs.isNotEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have already applied.')));
+      // switch to My Applications tab
+      DefaultTabController.of(context)?.animateTo(1);
+      return;
+    }
+
+    final status = (vacancyData['status'] as String?) ?? 'open';
+    final slots = (vacancyData['slots'] as num?)?.toInt() ?? 0;
+    final deadline = (vacancyData['applicationDeadline'] as Timestamp?)?.toDate();
+    if (status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(DateTime.now()))) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This vacancy is not accepting applications.')));
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Confirm Application'),
+        content: const Text('Apply with your profile and resume?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Apply')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
     try {
-      final dup = await _db
-          .collection('applications')
-          .where('vacancyId', isEqualTo: vacancyId)
-          .where('workerId', isEqualTo: uid)
-          .limit(1)
-          .get();
-      if (dup.docs.isNotEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have already applied.')));
-        widget.onApplied();
-        return;
-      }
-
-      // Basic client validation: can't apply if closed/filled/slots 0 or past deadline.
-      final status = (vacancyData['status'] as String?) ?? 'open';
-      final slots = (vacancyData['slots'] as num?)?.toInt() ?? 0;
-      final deadlineTs = vacancyData['applicationDeadline'] as Timestamp?;
-      final deadline = deadlineTs?.toDate();
-      final now = DateTime.now();
-      if (status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(now))) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This vacancy is no longer accepting applications.')));
-        return;
-      }
-
-      // Confirmation dialog for single-tap apply (prefill from profile/resume)
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: const Text('Confirm application'),
-          content: const Text('Apply with your profile and resume? This will send your application to the employer.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Apply')),
-          ],
-        ),
-      );
-      if (confirmed != true) return;
-
       await _appSvc.createApplication(workerId: uid, vacancyId: vacancyId, employerId: employerId);
-
       setState(() => _optimisticRemoved.add(vacancyId));
+      DefaultTabController.of(context)?.animateTo(1);
+      debugPrint('APPLY SUCCESS: vacancy=$vacancyId');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Application sent.')));
-      widget.onApplied();
     } on FirebaseException catch (e) {
+      debugPrint('APPLY ERROR: ${e.code} ${e.message}');
       if (!mounted) return;
-      final msg = e.message ?? 'Failed to apply';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-      if (e.code == 'already-exists') widget.onApplied();
-    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'Failed to apply')));
+    } catch (e) {
+      debugPrint('APPLY EXCEPTION: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to apply')));
     }
   }
 
-  // Helper: format optional Timestamp -> readable string
   String _formatRange(Map<String, dynamic> data) {
-    final sTs = data['startAt'];
-    final eTs = data['endAt'];
-    DateTime? s;
-    DateTime? e;
-    if (sTs is Timestamp) s = sTs.toDate();
-    if (eTs is Timestamp) e = eTs.toDate();
-    if (s != null && e != null) return '${_dateTimeFmt.format(s)} — ${_dateTimeFmt.format(e)}';
-    if (s != null) return '${_dateFmt.format(s)}';
+    final s = data['startAt'] as Timestamp?;
+    final e = data['endAt'] as Timestamp?;
+    if (s != null && e != null) return '${_dateTimeFmt.format(s.toDate())} - ${_dateTimeFmt.format(e.toDate())}';
+    if (s != null) return _dateTimeFmt.format(s.toDate());
     return 'TBA';
   }
 
-  Widget _buildVacancyCard(BuildContext context, DocumentSnapshot<Map<String, dynamic>> v, bool alreadyApplied) {
-    final theme = Theme.of(context);
-    final data = v.data() ?? {};
+  Widget _vacancyCard(BuildContext context, DocumentSnapshot<Map<String, dynamic>> doc, bool alreadyApplied) {
+    final data = doc.data() ?? {};
     final title = (data['title'] as String?) ?? 'Vacancy';
-    final description = (data['description'] as String?) ?? '';
+    final desc = (data['description'] as String?) ?? '';
     final location = (data['location'] as String?) ?? '';
-    final dress = (data['dressCode'] as String?) ?? '';
     final rate = data['ratePerHour'];
     final slots = (data['slots'] as num?)?.toInt() ?? 0;
     final status = (data['status'] as String?) ?? 'open';
-    final deadlineTs = data['applicationDeadline'] as Timestamp?;
-    final deadline = deadlineTs?.toDate();
-    final now = DateTime.now();
-    final isClosed = status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(now));
+    final deadline = (data['applicationDeadline'] as Timestamp?)?.toDate();
+    final isClosed = status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(DateTime.now()));
 
     final employerId = data['employerId'] as String?;
-    final employerNameField = (data['employerName'] as String?) ?? (data['employer'] as String?);
-    final employerAvatarField = (data['employerAvatarUrl'] as String?) ?? (data['employerAvatar'] as String?);
+    String? employerName = (data['employerName'] as String?) ?? (data['employer'] as String?);
+    String? employerAvatar = (data['employerAvatarUrl'] as String?) ?? (data['employerAvatar'] as String?);
 
-    String? employerName = employerNameField;
-    String? employerAvatar = employerAvatarField;
-
-    // If vacancy doesn't include employer details, check cache
     if ((employerName == null || employerName.isEmpty) && employerId != null && _employerCache.containsKey(employerId)) {
       employerName = _employerCache[employerId]?['name'];
-    }
-    if ((employerAvatar == null || employerAvatar.isEmpty) && employerId != null && _employerCache.containsKey(employerId)) {
       employerAvatar = _employerCache[employerId]?['avatar'];
     }
 
-    // Compact chips
-    final chips = <Widget>[];
-    if (rate != null) chips.add(Chip(label: Text('\$${(rate is num ? rate.toString() : rate)} /hr'), avatar: const Icon(Icons.attach_money, size: 18)));
-    if (location.isNotEmpty) chips.add(Chip(label: Text(location), avatar: const Icon(Icons.place, size: 18)));
-    if (dress.isNotEmpty) chips.add(Chip(label: Text(dress), avatar: const Icon(Icons.checkroom, size: 18)));
-    if (deadline != null) chips.add(Chip(label: Text('Apply by ${_dateFmt.format(deadline)}'), avatar: const Icon(Icons.event_busy, size: 18)));
-    chips.add(Chip(label: Text('Slots: $slots'), avatar: const Icon(Icons.group, size: 18)));
-
-    // logo rendering helper (updated to preserve colors and use contain)
-    Widget _logoAvatar({double size = 40}) {
-      if (employerAvatar != null && employerAvatar.isNotEmpty) {
-        return Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.black12),
-          ),
-          child: ClipOval(
-            child: FittedBox(
-              fit: BoxFit.contain,
-              alignment: Alignment.center,
-              child: Image.network(
-                employerAvatar,
-                // no explicit width/height here so FittedBox controls scaling
-                errorBuilder: (c, e, st) {
-                  return CircleAvatar(
-                    radius: size / 2,
-                    backgroundColor: theme.colorScheme.surface,
-                    child: Text(
-                      (employerName != null && employerName.isNotEmpty) ? employerName[0] : (title.isNotEmpty ? title[0] : '?'),
-                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-                    ),
-                  );
-                },
-              ),
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            CircleAvatar(
+              radius: 22,
+              backgroundImage: (employerAvatar != null && employerAvatar.isNotEmpty) ? NetworkImage(employerAvatar) : null,
+              child: (employerAvatar == null || employerAvatar.isEmpty) ? Text((employerName ?? title)[0]) : null,
             ),
-          ),
-        );
-      }
-
-      // no image, show initial
-      return Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.black12),
-          color: theme.colorScheme.primary.withOpacity(.08),
-        ),
-        child: Center(
-          child: Text(
-            (employerName != null && employerName.isNotEmpty) ? employerName[0] : (title.isNotEmpty ? title[0] : '?'),
-            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-          ),
-        ),
-      );
-    }
-
-    return InkWell(
-      onTap: () {
-        // Open vacancy details
-        Navigator.of(context).push(MaterialPageRoute(
-          builder: (c) => VacancyDetailScreen(vacancyId: v.id, vacancyData: data),
-        ));
-      },
-      child: Card(
-        elevation: 0,
-        color: theme.colorScheme.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header row: avatar + (title + employer) + apply button
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  // Logo avatar (preserve colors, avoid tint)
-                  _logoAvatar(size: 40),
-                  const SizedBox(width: 12),
-                  // Title + employer name
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                        const SizedBox(height: 4),
-                        Text(
-                          employerName ?? 'Employer',
-                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface.withOpacity(.7)),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  // Apply button - same height and vertically centered
-                  SizedBox(
-                    height: 38,
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: theme.colorScheme.primary,
-                        foregroundColor: theme.colorScheme.onPrimary,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                      ),
-                      icon: Icon(isClosed ? Icons.block : Icons.check_circle, size: 18),
-                      label: Text(alreadyApplied ? 'Applied' : (isClosed ? 'Closed' : "I'm Interested")),
-                      onPressed: alreadyApplied || isClosed
-                          ? null
-                          : () async {
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Applying...')));
-                              await _expressInterest(v.id, data);
-                            },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              // Date/time range and short description
-              Text(_formatRange(data), style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-              const SizedBox(height: 8),
-              if (description.isNotEmpty)
-                Text(description, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium),
-              const SizedBox(height: 10),
-              // Chips row
-              Wrap(spacing: 8, runSpacing: 6, children: chips),
-              const SizedBox(height: 10),
-              // Footer: small metadata with status and updatedAt
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Status: ${status[0].toUpperCase()}${status.substring(1)}',
-                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface.withOpacity(.7)),
-                    ),
-                  ),
-                  if (data['updatedAt'] is Timestamp)
-                    Text(_dateFmt.format((data['updatedAt'] as Timestamp).toDate()), style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface.withOpacity(.6))),
-                ],
-              ),
-            ],
-          ),
-        ),
+            const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(employerName ?? 'Employer', style: Theme.of(context).textTheme.bodySmall),
+            ])),
+            FilledButton.icon(
+              icon: Icon(isClosed ? Icons.block : Icons.check_circle, size: 18),
+              label: Text(alreadyApplied ? 'Applied' : (isClosed ? 'Closed' : "I'm Interested")),
+              onPressed: (alreadyApplied || isClosed) ? null : () async {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Applying...')));
+                await _expressInterest(doc.id, data);
+              },
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(_formatRange(data), style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 6),
+          if (desc.isNotEmpty) Text(desc, maxLines: 3, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, children: [
+            if (rate != null) Chip(label: Text('\$${rate.toString()} /hr')),
+            if (location.isNotEmpty) Chip(label: Text(location)),
+            Chip(label: Text('Slots: $slots')),
+            if (deadline != null) Chip(label: Text('Apply by ${_dateFmt.format(deadline)}')),
+          ]),
+        ]),
       ),
     );
   }
@@ -417,66 +240,47 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
   @override
   Widget build(BuildContext context) {
     final uid = _auth.currentUser?.uid;
-    if (uid == null) {
-      return const Center(child: Text('Please sign in.'));
-    }
+    if (uid == null) return const Center(child: Text('Please sign in.'));
 
     final appsStream = _db.collection('applications').where('workerId', isEqualTo: uid).snapshots();
-
-    final vacancies = _db
-        .collection('vacancies')
-        .where('status', isEqualTo: 'open')
-        .orderBy('createdAt', descending: true)
-        .snapshots();
+    final vacanciesStream = _db.collection('vacancies').where('status', isEqualTo: 'open').orderBy('createdAt', descending: true).snapshots();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: appsStream,
       builder: (context, appsSnap) {
-        final appliedIds = <String>{};
+        final applied = <String>{};
         if (appsSnap.hasData) {
           for (final d in appsSnap.data!.docs) {
-            final vid = d.data()['vacancyId'] as String?;
-            if (vid != null) appliedIds.add(vid);
+            final vid = d.data()['vacancyId'] as String?; if (vid != null) applied.add(vid);
           }
         }
-        appliedIds.addAll(_optimisticRemoved);
+        applied.addAll(_optimisticRemoved);
 
         return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: vacancies,
+          stream: vacanciesStream,
           builder: (context, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (!snap.hasData || snap.data!.docs.isEmpty) {
-              return const Center(child: Text('No vacancies at the moment.'));
-            }
+            if (snap.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+            if (!snap.hasData || snap.data!.docs.isEmpty) return const Center(child: Text('No open vacancies'));
 
-            final docs = snap.data!.docs.where((d) => !appliedIds.contains(d.id)).toList();
-            if (docs.isEmpty) return const Center(child: Text('No open vacancies'));
+            final docs = snap.data!.docs.where((d) => !applied.contains(d.id)).toList();
 
-            // Collect unique employerIds missing from cache and trigger batch load
-            final missingIds = <String>{};
+            final missing = <String>{};
             for (final d in docs) {
               final data = d.data() ?? {};
               final eid = data['employerId'] as String?;
               final name = (data['employerName'] as String?) ?? (data['employer'] as String?);
-              if ((name == null || name.isEmpty) && eid != null && eid.isNotEmpty && !_employerCache.containsKey(eid) && !_loadingEmployerIds.contains(eid)) {
-                missingIds.add(eid);
-              }
+              if ((name == null || name.isEmpty) && eid != null && !_employerCache.containsKey(eid) && !_loadingEmployerIds.contains(eid)) missing.add(eid);
             }
-            if (missingIds.isNotEmpty) {
-              // fire and forget; _batchLoadEmployers will call setState when done
-              _batchLoadEmployers(missingIds.toList());
-            }
+            if (missing.isNotEmpty) _batchLoadEmployers(missing.toList());
 
             return ListView.separated(
               padding: const EdgeInsets.all(12),
               itemCount: docs.length,
               separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, i) {
-                final v = docs[i];
-                final alreadyApplied = appliedIds.contains(v.id);
-                return _buildVacancyCard(context, v, alreadyApplied);
+                final d = docs[i];
+                final alreadyApplied = applied.contains(d.id);
+                return _vacancyCard(context, d, alreadyApplied);
               },
             );
           },
@@ -518,7 +322,7 @@ class _MyApplicationsState extends State<_MyApplications> {
 
   void _showTimeline(BuildContext context, Map<String, dynamic> application) {
     final timeline = (application['timeline'] as List<dynamic>?) ?? [];
-    final entries = List<Map<String, dynamic>>.from(timeline.map((e) => Map<String, dynamic>.from(e as Map)));
+    final entries = timeline.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     entries.sort((a, b) {
       final ta = a['ts'] as Timestamp?;
       final tb = b['ts'] as Timestamp?;
@@ -530,106 +334,53 @@ class _MyApplicationsState extends State<_MyApplications> {
 
     showModalBottomSheet(
       context: context,
-      builder: (c) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('Application timeline', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8),
-                if (entries.isEmpty)
-                  const Padding(padding: EdgeInsets.symmetric(vertical: 24), child: Text('No timeline entries yet.')),
-                if (entries.isNotEmpty)
-                  Flexible(
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: entries.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, i) {
-                        final e = entries[i];
-                        final ts = e['ts'] as Timestamp?;
-                        final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : '—';
-                        final status = e['status'] ?? 'unknown';
-                        final note = e['note'] ?? '';
-                        return ListTile(
-                          leading: Icon(_iconForStatus(status.toString())),
-                          title: Text(_labelForStatus(status.toString())),
-                          subtitle: Text(note),
-                          trailing: Text(when, style: const TextStyle(fontSize: 12, color: Colors.black54)),
-                        );
-                      },
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
+      builder: (c) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Application timeline', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            if (entries.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 24), child: Text('No timeline entries yet.')),
+            if (entries.isNotEmpty)
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: entries.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final e = entries[i];
+                    final ts = e['ts'] as Timestamp?;
+                    final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : '—';
+                    final label = e['status'] ?? 'update';
+                    final note = e['note'] ?? '';
+                    return ListTile(
+                      leading: const Icon(Icons.info_outline),
+                      title: Text(label.toString()),
+                      subtitle: Text(note.toString()),
+                      trailing: Text(when, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                    );
+                  },
+                ),
+              ),
+          ]),
+        ),
+      ),
     );
-  }
-
-  String _labelForStatus(String s) {
-    switch (s) {
-      case 'sent':
-        return 'Sent';
-      case 'viewed':
-        return 'Viewed';
-      case 'shortlisted':
-        return 'Shortlisted';
-      case 'interviewed':
-        return 'Interviewed';
-      case 'accepted':
-        return 'Accepted';
-      case 'rejected':
-        return 'Rejected';
-      default:
-        return s[0].toUpperCase() + s.substring(1);
-    }
-  }
-
-  IconData _iconForStatus(String s) {
-    switch (s) {
-      case 'sent':
-        return Icons.send;
-      case 'viewed':
-        return Icons.remove_red_eye;
-      case 'shortlisted':
-        return Icons.star;
-      case 'interviewed':
-        return Icons.person_search;
-      case 'accepted':
-        return Icons.check_circle;
-      case 'rejected':
-        return Icons.cancel;
-      default:
-        return Icons.info;
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     final uid = _auth.currentUser?.uid;
-    if (uid == null) {
-      return const Center(child: Text('Please sign in.'));
-    }
+    if (uid == null) return const Center(child: Text('Please sign in.'));
 
-    final appsStream = _db
-        .collection('applications')
-        .where('workerId', isEqualTo: uid)
-        .orderBy('createdAt', descending: true)
-        .snapshots();
+    final appsStream = _db.collection('applications').where('workerId', isEqualTo: uid).orderBy('createdAt', descending: true).snapshots();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+
       stream: appsStream,
       builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (!snap.hasData || snap.data!.docs.isEmpty) {
-          return const Center(child: Text('No applications yet.'));
-        }
+        if (snap.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+        if (!snap.hasData || snap.data!.docs.isEmpty) return const Center(child: Text('No applications yet.'));
 
         final docs = snap.data!.docs.where((d) {
           final vid = d.data()['vacancyId'] as String? ?? '';
@@ -651,12 +402,10 @@ class _MyApplicationsState extends State<_MyApplications> {
 
             final futureVacancy = vacancyId == null
                 ? null
-                : FirebaseFirestore.instance
-                    .collection('vacancies')
-                    .doc(vacancyId)
-                    .get();
+                : FirebaseFirestore.instance.collection('vacancies').doc(vacancyId).get();
 
             return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>?>(
+
               future: futureVacancy,
               builder: (context, vSnap) {
                 String title = 'Applied role';
@@ -671,47 +420,31 @@ class _MyApplicationsState extends State<_MyApplications> {
                 return Card(
                   elevation: 0,
                   color: Theme.of(context).colorScheme.surface,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   child: ListTile(
-                    leading: status == 'shortlisted'
-                        ? Chip(label: const Text('Shortlisted'), backgroundColor: Colors.yellow.shade700)
-                        : null,
+                    leading: status == 'shortlisted' ? Chip(label: const Text('Shortlisted'), backgroundColor: Colors.yellow.shade700) : null,
                     title: Text(title),
                     subtitle: Text(subtitle),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.timeline),
-                          tooltip: 'Timeline',
-                          onPressed: () => _showTimeline(context, a),
-                        ),
-                        TextButton(
-                          onPressed: vacancyId == null
-                              ? null
-                              : () async {
-                                  final confirmed = await showDialog<bool>(
-                                    context: context,
-                                    builder: (c) => AlertDialog(
-                                      backgroundColor: Colors.white,
-                                      title: const Text('Withdraw interest'),
-                                      content: const Text('Are you sure you want to withdraw your interest?'),
-                                      actions: [
-                                        TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
-                                        TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Withdraw')),
-                                      ],
-                                    ),
-                                  );
-                                  if (confirmed == true && vacancyId != null) {
-                                    await _withdraw(vacancyId);
-                                  }
-                                },
-                          child: const Text('Withdraw'),
-                        ),
-                      ],
-                    ),
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      IconButton(icon: const Icon(Icons.timeline), tooltip: 'Timeline', onPressed: () => _showTimeline(context, a)),
+                      TextButton(
+                        onPressed: vacancyId == null ? null : () async {
+                          final confirmed = await showDialog<bool>(
+                            context: context,
+                            builder: (c) => AlertDialog(
+                              title: const Text('Withdraw Interest'),
+                              content: const Text('Are you sure you want to withdraw your interest?'),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
+                                TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Withdraw')),
+                              ],
+                            ),
+                          );
+                          if (confirmed == true && vacancyId != null) await _withdraw(vacancyId);
+                        },
+                        child: const Text('Withdraw'),
+                      ),
+                    ]),
                   ),
                 );
               },

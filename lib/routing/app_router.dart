@@ -11,6 +11,8 @@ import 'package:flexcrew/features/auth/create_account_screen.dart';
 import 'package:flexcrew/features/auth/forgot_password_screen.dart';
 import 'package:flexcrew/features/home/worker_home.dart';
 import 'package:flexcrew/features/home/employer_home.dart';
+import 'package:flexcrew/features/home/vacancy_create_screen.dart';
+import 'package:flexcrew/features/home/vacancy_edit_screen.dart';
 import 'package:flexcrew/features/profile/worker_profile_edit_screen.dart';
 import 'package:flexcrew/features/profile/employer_profile_edit_screen.dart';
 import 'package:flexcrew/features/profile/edit_profile_screen.dart';
@@ -22,7 +24,7 @@ import 'package:flexcrew/features/settings/settings_screen.dart';
 final GoRouter appRouter = GoRouter(
   initialLocation: '/login',
   // DEBUG: do not refresh on auth changes here; keep routing deterministic for debugging.
-  // NOTE: This file is temporary — restore your original redirect logic after debugging.
+  // NOTE: This file is temporary â€” restore your original redirect logic after debugging.
   routes: [
     GoRoute(
       path: '/login',
@@ -42,12 +44,35 @@ final GoRouter appRouter = GoRouter(
     GoRoute(path: '/forgot-password', name: 'forgot-password', builder: (_, __) => const ForgotPasswordScreen()),
     GoRoute(path: '/worker', name: 'worker-home', builder: (_, __) => const WorkerHomeScreen()),
     GoRoute(path: '/worker/wallet', name: 'worker-wallet', builder: (_, __) => const WalletScreen(role: 'crew')),
-    GoRoute(path: '/onboarding', name: 'onboarding', builder: (_, __) => const WorkerOnboardingScreen()),
+    GoRoute(path: '/onboarding', name: 'onboarding', builder: (context, st) {
+      final extra = st.extra;
+      String? prefillName;
+      String? prefillUid;
+      if (extra is Map<String, dynamic>) {
+        prefillName = extra['prefillName'] as String?;
+        prefillUid = extra['uid'] as String?;
+      }
+      return WorkerOnboardingScreen(prefillName: prefillName, prefillUid: prefillUid);
+    }),
     GoRoute(path: '/employer/onboarding', name: 'employer-onboarding', builder: (_, __) => const EmployerOnboardingScreen()),
     GoRoute(path: '/worker/profile/edit', name: 'worker-profile-edit', builder: (_, __) => const WorkerProfileEditScreen()),
     GoRoute(path: '/employer', name: 'employer-home', builder: (_, __) => const EmployerHomeScreen()),
     GoRoute(path: '/employer/wallet', name: 'employer-wallet', builder: (_, __) => const WalletScreen(role: 'employer')),
     GoRoute(path: '/employer/profile/edit', name: 'employer-profile-edit', builder: (_, __) => const EmployerProfileEditScreen()),
+    // Vacancy create/edit
+    GoRoute(
+      path: '/employer/vacancy/new',
+      name: 'vacancy-create',
+      builder: (_, __) => const VacancyCreateScreen(),
+    ),
+    GoRoute(
+      path: '/employer/vacancy/:id/edit',
+      name: 'vacancy-edit',
+      builder: (context, state) {
+        final id = state.pathParameters['id'] ?? '';
+        return VacancyEditScreen(vacancyId: id);
+      },
+    ),
     GoRoute(path: '/profile/edit', name: 'profile-edit', builder: (_, __) => const EditProfileScreen()),
     GoRoute(path: '/settings', name: 'settings', builder: (_, __) => const SettingsScreen()),
   ],

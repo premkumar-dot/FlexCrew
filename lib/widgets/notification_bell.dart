@@ -1,6 +1,7 @@
-﻿import 'package:flutter/material.dart';
+// Notification bell uses the global router via the rg alias and falls back to NavigationService.
+import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flexcrew/routing/router_globals.dart';
+import 'package:flexcrew/routing/router_globals.dart' as rg;
 import 'package:flexcrew/services/navigation_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -26,7 +27,7 @@ class NotificationBell extends StatelessWidget {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
       try {
-        appRouter.go('/login');
+        rg.appRouter.go('/login');
       } catch (_) {
         try {
           NavigationService.instance.go('/login');
@@ -38,7 +39,7 @@ class NotificationBell extends StatelessWidget {
     final routeRaw = (data?['route'] as String?) ?? '';
     if (routeRaw.isEmpty) {
       try {
-        appRouter.go('/notifications');
+        rg.appRouter.go('/notifications');
       } catch (_) {
         try {
           NavigationService.instance.go('/notifications');
@@ -50,7 +51,7 @@ class NotificationBell extends StatelessWidget {
     final route = _normalizeRoute(routeRaw);
     if (route.startsWith('/worker') || route.startsWith('/employer')) {
       try {
-        appRouter.go(route);
+        rg.appRouter.go(route);
       } catch (_) {
         try {
           NavigationService.instance.go(route);
@@ -63,7 +64,7 @@ class NotificationBell extends StatelessWidget {
     final base = role == 'employer' ? '/employer' : '/worker';
     final target = route.startsWith('/') ? '$base$route' : '$base/$route';
     try {
-      appRouter.go(target);
+      rg.appRouter.go(target);
     } catch (_) {
       try {
         NavigationService.instance.go(target);
@@ -79,7 +80,7 @@ class NotificationBell extends StatelessWidget {
         icon: const Icon(Icons.notifications_none),
         onPressed: () {
           try {
-            appRouter.go('/login');
+            rg.appRouter.go('/login');
           } catch (_) {
             try {
               NavigationService.instance.go('/login');
