@@ -1,168 +1,143 @@
+import 'dart:async';
 import 'dart:typed_data';
-import 'package:firebase_storage/firebase_storage.dart';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+
+/// Storage helper and compatibility shim for legacy callers that expect
+/// `storage_service.StorageService.instance.*` APIs.
 class StorageService {
   StorageService._();
-  static final instance = StorageService._();
+  static final StorageService instance = StorageService._();
 
-  final _storage = FirebaseStorage.instance;
+  final FirebaseStorage _storage = FirebaseStorage.instance;
 
-  /// Uploads bytes as avatars/{uid}/avatar_<timestamp>.ext, returns a public download URL.
-  Future<String> uploadAvatar({
-    required String uid,
-    required Uint8List bytes,
-    required String contentType, // e.g. "image/jpeg" | "image/png"
-  }) async {
-    String ext;
-    switch (contentType) {
-      case 'image/png':
-        ext = 'png';
-        break;
-      case 'image/webp':
-        ext = 'webp';
-        break;
-      case 'image/jpeg':
-      default:
-        ext = 'jpg';
-    }
+  // Map common content types to file extensions
+  static const _extFromContentType = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'application/pdf': 'pdf',
+  };
 
-    final filename = 'avatar_${DateTime.now().millisecondsSinceEpoch}.$ext';
-    final ref = _storage.ref().child('avatars/$uid/$filename');
-
-    final task = ref.putData(bytes, SettableMetadata(contentType: contentType));
-    await task;
-    return await ref.getDownloadURL();
+  String _extForContentType(String contentType) {
+    return _extFromContentType[contentType] ?? contentType.split('/').lastWhere((_) => true, orElse: () => 'bin');
   }
 
-  /// Upload with progress callback (0.0 - 1.0) and return the download URL.
+  /// Upload avatar bytes to `avatars/{uid}/{generatedFilename}` with progress callback.
+  /// After upload succeeds, updates FirebaseAuth.currentUser.photoURL and writes
+  /// `users/{uid}.photoUrl` (merge).
   Future<String> uploadAvatarWithProgress({
     required String uid,
     required Uint8List bytes,
     required String contentType,
-    required void Function(double progress) onProgress,
+    void Function(double progress)? onProgress,
   }) async {
-    print('[StorageService] uploadAvatarWithProgress START: uid=$uid, size=${bytes.length}, contentType=$contentType');
-    
-    String ext;
-    switch (contentType) {
-      case 'image/png':
-        ext = 'png';
-        break;
-      case 'image/webp':
-        ext = 'webp';
-        break;
-      case 'image/jpeg':
-      default:
-        ext = 'jpg';
-    }
-
+    final ext = _extForContentType(contentType);
     final filename = 'avatar_${DateTime.now().millisecondsSinceEpoch}.$ext';
     final ref = _storage.ref().child('avatars/$uid/$filename');
-    print('[StorageService] Starting upload to: avatars/$uid/$filename');
+    final metadata = SettableMetadata(contentType: contentType);
 
-    final uploadTask =
-        ref.putData(bytes, SettableMetadata(contentType: contentType));
-    print('[StorageService] putData called, now listening to progress...');
+    final uploadTask = ref.putData(bytes, metadata);
 
-    // Listen to progress
-    final sub = uploadTask.snapshotEvents.listen((snapshot) {
-      final total = snapshot.totalBytes;
-      final transferred = snapshot.bytesTransferred;
-      print('[StorageService] Progress: $transferred / $total bytes');
-      if (total > 0) {
-        final progress = transferred / total;
-        try {
-          onProgress(progress);
-        } catch (e) {
-          print('[StorageService] Error calling onProgress: $e');
-        }
-      }
-    });
-
-    print('[StorageService] Waiting for upload task to complete...');
-    await uploadTask.whenComplete(() async {
-      print('[StorageService] Upload task completed, cancelling subscription');
-      await sub.cancel();
-    });
-
-    print('[StorageService] Getting download URL...');
-    final url = await ref.getDownloadURL();
-    print('[StorageService] Got download URL: $url');
-    
-    return url;
-  }
-
-  /// Delete avatar files under `avatars/{uid}/`.
-  /// If [excludeDownloadUrl] is provided, that file is preserved.
-  /// Best-effort cleanup; errors are ignored.
-  Future<void> deleteAllAvatarsExcept(
-    String uid, {
-    String? excludeDownloadUrl,
-  }) async {
-    String? excludePath;
-    if (excludeDownloadUrl != null && excludeDownloadUrl.isNotEmpty) {
-      try {
-        final uri = Uri.parse(excludeDownloadUrl);
-        final segments = uri.pathSegments;
-        final oIndex = segments.indexOf('o');
-        if (oIndex != -1 && oIndex + 1 < segments.length) {
-          excludePath = Uri.decodeComponent(segments[oIndex + 1]);
-        }
-      } catch (_) {
-        excludePath = null;
-      }
-    }
-
+    StreamSubscription<TaskSnapshot>? sub;
     try {
-      final listRef = _storage.ref().child('avatars/$uid');
-      final listResult = await listRef.listAll();
-      final futures = <Future<void>>[];
-      for (final item in listResult.items) {
-        if (excludePath != null && item.fullPath == excludePath) continue;
-        futures.add(item.delete().catchError((_) {}));
+      sub = uploadTask.snapshotEvents.listen((snap) {
+        final total = snap.totalBytes;
+        final transferred = snap.bytesTransferred;
+        if (total != 0 && onProgress != null) {
+          onProgress(transferred / total);
+        }
+      });
+
+      final snapshot = await uploadTask.whenComplete(() {});
+      final downloadUrl = await snapshot.ref.getDownloadURL();
+
+      // Best-effort: update auth user and users doc
+      try {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null) {
+          await user.updatePhotoURL(downloadUrl);
+          await user.reload();
+        }
+      } catch (e, st) {
+        debugPrint('StorageService: failed to update auth photoURL: $e\n$st');
       }
-      await Future.wait(futures);
-    } catch (_) {
-      // ignore cleanup errors
+
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({'photoUrl': downloadUrl}, SetOptions(merge: true));
+      } catch (e, st) {
+        debugPrint('StorageService: failed to update users doc photoUrl: $e\n$st');
+      }
+
+      return downloadUrl;
+    } finally {
+      await sub?.cancel();
     }
   }
 
-  /// Helper: returns a storage path for worker documents.
-  /// Example: workerDocs/{uid}/{fileName}
-  String pathForWorkerDoc(String uid, String fileName) {
-    return 'workerDocs/$uid/$fileName';
-  }
-
-  /// Upload arbitrary bytes to the given storage path and return download URL.
-  /// If [onProgress] is provided it receives values 0.0-1.0.
+  /// Upload bytes to an explicit storage path (relative to root) and return download URL.
+  /// Example `path`: `workerDocs/{uid}/file.pdf` or `avatars/{uid}/file.png`
   Future<String> uploadBytes({
     required String path,
     required Uint8List data,
-    String? contentType,
-    void Function(double progress)? onProgress,
+    required String contentType,
   }) async {
     final ref = _storage.ref().child(path);
-    final metadata = contentType != null
-        ? SettableMetadata(contentType: contentType)
-        : null;
-    final uploadTask = metadata != null
-        ? ref.putData(data, metadata)
-        : ref.putData(data);
+    final metadata = SettableMetadata(contentType: contentType);
+    final task = ref.putData(data, metadata);
+    final snapshot = await task.whenComplete(() {});
+    final url = await snapshot.ref.getDownloadURL();
+    return url;
+  }
 
-    if (onProgress != null) {
-      final sub = uploadTask.snapshotEvents.listen((snapshot) {
-        final total = snapshot.totalBytes;
-        final transferred = snapshot.bytesTransferred;
-        if (total > 0) onProgress(transferred / total);
+  /// Helper to produce a canonical worker doc storage path for a file named by `name`.
+  /// Example result: `workerDocs/{uid}/{encoded-name}`
+  String pathForWorkerDoc(String uid, String name) {
+    final safe = Uri.encodeComponent(name);
+    return 'workerDocs/$uid/$safe';
+  }
+
+  /// Convenience wrapper kept for compatibility with callers that previously used
+  /// a top-level upload function. Returns a download URL and also updates auth/users.
+  Future<String> uploadAvatarAndSetProfile({
+    required String uid,
+    required Uint8List bytes,
+    required String filename,
+    required String contentType,
+  }) =>
+      uploadAvatarWithProgress(uid: uid, bytes: bytes, contentType: contentType, onProgress: null);
+
+  Future<String> uploadUserDoc(String uid, String filename, Uint8List bytes, {required String contentType}) async {
+    final path = 'workerDocs/$uid/$filename';
+    final ref = _storage.ref(path);
+
+    try {
+      final metadata = SettableMetadata(contentType: contentType);
+      final task = ref.putData(bytes, metadata);
+      task.snapshotEvents.listen((s) {
+        final transferred = s.bytesTransferred;
+        final total = s.totalBytes ?? transferred;
+        debugPrint('[Storage] Progress: $transferred / $total');
       });
-      await uploadTask.whenComplete(() async {
-        await sub.cancel();
-      });
-    } else {
-      await uploadTask;
+
+      final snapshot = await task;
+      final url = await snapshot.ref.getDownloadURL();
+      debugPrint('[Storage] Uploaded to $path -> $url');
+      return url;
+    } on FirebaseException catch (e) {
+      debugPrint('[Storage] FirebaseException code=${e.code} message=${e.message}');
+      if (e.code.contains('permission') || e.code.contains('unauth') || e.code == 'storage/unauthorized') {
+        throw Exception('Upload blocked by security rules or unauthenticated. Check Storage Rules and auth state.');
+      }
+      rethrow;
+    } catch (e, st) {
+      debugPrint('[Storage] Unexpected error: $e\n$st');
+      rethrow;
     }
-
-    return await ref.getDownloadURL();
   }
 }
 

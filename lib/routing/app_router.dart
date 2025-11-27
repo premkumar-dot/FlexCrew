@@ -56,7 +56,8 @@ final GoRouter appRouter = GoRouter(
     }),
     GoRoute(path: '/employer/onboarding', name: 'employer-onboarding', builder: (_, __) => const EmployerOnboardingScreen()),
     GoRoute(path: '/worker/profile/edit', name: 'worker-profile-edit', builder: (_, __) => const WorkerProfileEditScreen()),
-    GoRoute(path: '/employer', name: 'employer-home', builder: (_, __) => const EmployerHomeScreen()),
+    // Use the actual class defined in mobile/features/home/employer_home.dart
+    GoRoute(path: '/employer', name: 'employer-home', builder: (_, __) => const EmployerHome()),
     GoRoute(path: '/employer/wallet', name: 'employer-wallet', builder: (_, __) => const WalletScreen(role: 'employer')),
     GoRoute(path: '/employer/profile/edit', name: 'employer-profile-edit', builder: (_, __) => const EmployerProfileEditScreen()),
     // Vacancy create/edit
@@ -70,7 +71,9 @@ final GoRouter appRouter = GoRouter(
       name: 'vacancy-edit',
       builder: (context, state) {
         final id = state.pathParameters['id'] ?? '';
-        return VacancyEditScreen(vacancyId: id);
+        // If the caller passed vacancy data in state.extra, use it; otherwise pass null.
+        final Map<String, dynamic>? vacancyData = (state.extra is Map<String, dynamic>) ? (state.extra as Map<String, dynamic>) : null;
+        return VacancyEditScreen(vacancyId: id, vacancyData: vacancyData);
       },
     ),
     GoRoute(path: '/profile/edit', name: 'profile-edit', builder: (_, __) => const EditProfileScreen()),

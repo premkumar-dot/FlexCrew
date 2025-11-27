@@ -114,7 +114,7 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
   Future<void> _expressInterest(String vacancyId, Map<String, dynamic> vacancyData) async {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return;
-    final employerId = vacancyData['employerId'] as String?;
+    final employerId = vacancyData['employerId'] as String?; // may be null
     debugPrint('APPLY START: vacancy=$vacancyId worker=$uid employer=$employerId');
 
     final dup = await _db.collection('applications').where('vacancyId', isEqualTo: vacancyId).where('workerId', isEqualTo: uid).limit(1).get();
@@ -174,11 +174,39 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     return 'TBA';
   }
 
+  // Normalize location field which may be String or Map with name/lat/lng
+  String _extractLocationString(Map<String, dynamic> data) {
+    final locRaw = data['location'];
+    if (locRaw == null) return '';
+    if (locRaw is String) return locRaw.trim();
+    if (locRaw is Map) {
+      final v = locRaw['name'] ?? locRaw['displayName'];
+      if (v is String && v.trim().isNotEmpty) return v.trim();
+      final lat = locRaw['latitude'] ?? locRaw['lat'];
+      final lng = locRaw['longitude'] ?? locRaw['lng'] ?? locRaw['lon'];
+      if (lat != null && lng != null) return 'Location ${lat.toString()}, ${lng.toString()}';
+    }
+    try {
+      final s = locRaw.toString();
+      return s.trim().isNotEmpty ? s.trim() : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // Normalize dress code from various possible fields
+  String _extractDressCode(Map<String, dynamic> data) {
+    final v = data['dressCode'] ?? data['dress'] ?? data['dress_code'];
+    if (v is String && v.trim().isNotEmpty) return v.trim();
+    return '';
+  }
+
   Widget _vacancyCard(BuildContext context, DocumentSnapshot<Map<String, dynamic>> doc, bool alreadyApplied) {
     final data = doc.data() ?? {};
     final title = (data['title'] as String?) ?? 'Vacancy';
     final desc = (data['description'] as String?) ?? '';
-    final location = (data['location'] as String?) ?? '';
+    final location = _extractLocationString(data);
+    final dressCode = _extractDressCode(data);
     final rate = data['ratePerHour'];
     final slots = (data['slots'] as num?)?.toInt() ?? 0;
     final status = (data['status'] as String?) ?? 'open';
@@ -229,6 +257,7 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
           Wrap(spacing: 8, children: [
             if (rate != null) Chip(label: Text('\$${rate.toString()} /hr')),
             if (location.isNotEmpty) Chip(label: Text(location)),
+            if (dressCode.isNotEmpty) Chip(label: Text(dressCode)),
             Chip(label: Text('Slots: $slots')),
             if (deadline != null) Chip(label: Text('Apply by ${_dateFmt.format(deadline)}')),
           ]),
@@ -251,7 +280,12 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
         final applied = <String>{};
         if (appsSnap.hasData) {
           for (final d in appsSnap.data!.docs) {
-            final vid = d.data()['vacancyId'] as String?; if (vid != null) applied.add(vid);
+            final data = d.data();
+            final status = (data['status'] as String?) ?? '';
+            // Exclude withdrawn/deleted applications so withdraw shows vacancy again.
+            if (status == 'withdrawn' || status == 'deleted') continue;
+            final vid = data['vacancyId'] as String?;
+            if (vid != null) applied.add(vid);
           }
         }
         applied.addAll(_optimisticRemoved);
@@ -350,7 +384,7 @@ class _MyApplicationsState extends State<_MyApplications> {
                   itemBuilder: (context, i) {
                     final e = entries[i];
                     final ts = e['ts'] as Timestamp?;
-                    final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : '—';
+                    final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : 'â€”';
                     final label = e['status'] ?? 'update';
                     final note = e['note'] ?? '';
                     return ListTile(
@@ -383,7 +417,11 @@ class _MyApplicationsState extends State<_MyApplications> {
         if (!snap.hasData || snap.data!.docs.isEmpty) return const Center(child: Text('No applications yet.'));
 
         final docs = snap.data!.docs.where((d) {
-          final vid = d.data()['vacancyId'] as String? ?? '';
+          final data = d.data();
+          // hide withdrawn/deleted server-side records so they vanish from My Applications
+          final status = (data['status'] as String?) ?? '';
+          if (status == 'withdrawn' || status == 'deleted') return false;
+          final vid = data['vacancyId'] as String? ?? '';
           return !_optimisticWithdrawn.contains(vid);
         }).toList();
 
@@ -405,7 +443,6 @@ class _MyApplicationsState extends State<_MyApplications> {
                 : FirebaseFirestore.instance.collection('vacancies').doc(vacancyId).get();
 
             return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>?>(
-
               future: futureVacancy,
               builder: (context, vSnap) {
                 String title = 'Applied role';
@@ -414,7 +451,7 @@ class _MyApplicationsState extends State<_MyApplications> {
                 }
 
                 final subtitle = (createdAt is Timestamp)
-                    ? 'Status: $status • ${DateFormat.yMMMd().add_jm().format(createdAt.toDate())}'
+                    ? 'Status: $status â€¢ ${DateFormat.yMMMd().add_jm().format(createdAt.toDate())}'
                     : 'Status: $status';
 
                 return Card(

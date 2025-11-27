@@ -47,6 +47,7 @@ dev_dependencies:
   flutter_launcher_icons: ^0.13.1
   flutter_native_splash: ^2.4.1
   image: ^4.1.7 # pure Dart image processing (works on web & mobile)
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true

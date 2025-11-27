@@ -107,6 +107,18 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
     }
   }
 
+  String _readLocation(Map<String, dynamic> data) {
+    final s = (data['location'] as String?) ?? '';
+    if (s.toString().trim().isNotEmpty) return s.toString().trim();
+    final locMap = data['location'];
+    if (locMap is Map && locMap['name'] is String) return locMap['name'].toString();
+    return '';
+  }
+
+  String _readDress(Map<String, dynamic> data) {
+    return ((data['dressCode'] as String?) ?? '').toString().trim();
+  }
+
   Widget _mapSnippet(Map<String, dynamic> data) {
     final lat = data['locationLat'];
     final lng = data['locationLng'];
@@ -128,7 +140,6 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
 
     Map<String, String?> result = {'name': null, 'avatar': null, 'bio': null};
 
-    // Helper to extract common fields
     void _extract(Map<String, dynamic>? d) {
       if (d == null) return;
       result['name'] ??= (d['name'] ?? d['displayName'] ?? d['fullName'] ?? d['companyName']) as String?;
@@ -206,11 +217,19 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
     final deadline = (data['applicationDeadline'] as Timestamp?)?.toDate();
     final rate = data['ratePerHour'];
     final slots = (data['slots'] as num?)?.toInt() ?? 0;
-    final place = (data['location'] as String?) ?? 'Location not specified';
+    final place = _readLocation(data);
+    final dress = _readDress(data);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Vacancy'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('lib/features/home/vacancy_detail.dart', style: theme.textTheme.bodySmall),
+            const SizedBox(height: 2),
+            const Text('Vacancy'),
+          ],
+        ),
         actions: const [UserAvatarButton()],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -293,7 +312,7 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
           if (startAt != null || endAt != null)
             Text(
               startAt != null && endAt != null
-                  ? '${_dateTimeFmt.format(startAt.toDate())} • ${_dateTimeFmt.format(endAt.toDate())}'
+                  ? '${_dateTimeFmt.format(startAt.toDate())} - ${_dateTimeFmt.format(endAt.toDate())}'
                   : (startAt != null ? _dateTimeFmt.format(startAt.toDate()) : _dateFmt.format(endAt!.toDate())),
               style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -301,6 +320,9 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
 
           if (description.isNotEmpty) Text(description, style: theme.textTheme.bodyMedium),
           const SizedBox(height: 12),
+
+          if (place.isNotEmpty) ListTile(leading: const Icon(Icons.location_on), title: const Text('Location'), subtitle: Text(place)),
+          if (dress.isNotEmpty) ListTile(leading: const Icon(Icons.checkroom), title: const Text('Dress code'), subtitle: Text(dress)),
 
           _mapSnippet(data),
           if ((data['locationLat'] is num && data['locationLng'] is num)) const SizedBox(height: 12),
@@ -315,7 +337,7 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Expanded(
-                    child: Text(place, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    child: Text(place.isNotEmpty ? place : 'Location not specified', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                   ),
                   const SizedBox(width: 12),
                   SizedBox(
@@ -377,11 +399,19 @@ class _VacancyDetailScreenState extends State<VacancyDetailScreen> {
             spacing: 8,
             runSpacing: 6,
             children: [
-              if (rate != null)
-                Chip(
-                  label: Text('\$${rate.toString()} /hr'),
-                ),
+              // Rate
+              if (rate != null) Chip(label: Text('\$${rate.toString()} /hr')),
+
+              // Location (use place previously computed)
+              if (place.isNotEmpty) Chip(label: Text(place)),
+
+              // Dress code (try common fields)
+              if (dress.isNotEmpty) Chip(label: Text(dress)),
+
+              // Slots (after location + dress)
               Chip(label: Text('Slots: $slots')),
+
+              // Deadline
               if (deadline != null) Chip(label: Text('Apply by ${_dateFmt.format(deadline)}')),
             ],
           ),

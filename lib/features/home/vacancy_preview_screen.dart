@@ -15,6 +15,18 @@ class VacancyPreviewScreen extends StatelessWidget {
     return v.toString();
   }
 
+  String _readLocation(Map<String, dynamic> v) {
+    final l = (v['location'] as String?) ?? '';
+    if (l.trim().isNotEmpty) return l.trim();
+    final locMap = v['location'];
+    if (locMap is Map && locMap['name'] is String) return locMap['name'].toString();
+    return '';
+  }
+
+  String _readDress(Map<String, dynamic> v) {
+    return ((v['dressCode'] as String?) ?? '').toString().trim();
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = vacancy['title'] as String? ?? 'Vacancy';
@@ -25,6 +37,8 @@ class VacancyPreviewScreen extends StatelessWidget {
     final endAt = vacancy['endAt'];
     final deadline = vacancy['applicationDeadline'];
     final tags = vacancy['tags'] as List<dynamic>? ?? [];
+    final location = _readLocation(vacancy);
+    final dress = _readDress(vacancy);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Preview Vacancy')),
@@ -41,11 +55,25 @@ class VacancyPreviewScreen extends StatelessWidget {
                   if (desc.isNotEmpty) Text(desc),
                   const SizedBox(height: 12),
                   Wrap(spacing: 8, runSpacing: 6, children: [
-                    Chip(label: Text('Slots: $slots')),
+                    // Rate
                     if (rate != null) Chip(label: Text('\$${rate.toString()} /hr')),
+
+                    // Location
+                    if (location.isNotEmpty) Chip(label: Text(location)),
+
+                    // Dress code
+                    if (dress.isNotEmpty) Chip(label: Text(dress)),
+
+                    // Slots (after location and dress)
+                    Chip(label: Text('Slots: $slots')),
+
                     if (tags.isNotEmpty) Chip(label: Text('Tags: ${tags.join(', ')}')),
                   ]),
                   const SizedBox(height: 12),
+                  // Explicit Location & Dress list items for preview clarity
+                  if (location.isNotEmpty) ListTile(leading: const Icon(Icons.location_on), title: const Text('Location'), subtitle: Text(location)),
+                  if (dress.isNotEmpty) ListTile(leading: const Icon(Icons.checkroom), title: const Text('Dress code'), subtitle: Text(dress)),
+                  const SizedBox(height: 8),
                   ListTile(leading: const Icon(Icons.event), title: const Text('Start'), subtitle: Text(_formatTs(startAt))),
                   ListTile(leading: const Icon(Icons.event), title: const Text('End'), subtitle: Text(_formatTs(endAt))),
                   ListTile(leading: const Icon(Icons.schedule), title: const Text('Apply By'), subtitle: Text(_formatTs(deadline))),
