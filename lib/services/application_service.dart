@@ -22,6 +22,14 @@ class ApplicationService {
     return Future.any([future, timeoutFuture]);
   }
 
+  // Helper to safely extract a string note/message from the optional extra map.
+  String _noteFromExtra(Map<String, dynamic>? extra) {
+    if (extra == null) return '';
+    final v = extra['note'] ?? extra['message'];
+    if (v is String) return v;
+    return '';
+  }
+
   /// Create an application (Express Interest).
   /// - Allows re-apply by updating an existing withdrawn/deleted/cancelled doc.
   /// - Accepts nullable employerId to match callers.
@@ -68,15 +76,17 @@ class ApplicationService {
 
         if (reapplyable.contains(existingStatus)) {
           final docRef = _db.collection('applications').doc(existing.id);
-          final createdValue =
-              f.kIsWeb ? Timestamp.fromDate(DateTime.now().toUtc()) : FieldValue.serverTimestamp();
 
-          // Build timeline entry with optional note extracted from extra (if provided)
-          final String note = (extra != null && (extra['note'] is String ? extra['note'] : (extra['message'] is String ? extra['message'] : ''))) as String? ?? '';
+          // Use concrete Timestamp for timeline entries (serverTimestamp can't be nested in arrayUnion)
+          final timelineTs = Timestamp.fromDate(DateTime.now().toUtc());
+          final serverNow = FieldValue.serverTimestamp();
+
+          // Build timeline entry using helper
+          final String note = _noteFromExtra(extra);
           final Map<String, dynamic> timelineEntry = <String, dynamic>{
             'status': 'sent',
             'label': 'Application submitted',
-            'ts': createdValue,
+            'ts': timelineTs,
             'by': workerId,
             'note': note,
           };
@@ -88,9 +98,9 @@ class ApplicationService {
             'workerId': workerId,
             'workerEmail': user.email ?? existing.data()['workerEmail'] ?? '',
             'status': 'sent',
-            'updatedAt': createdValue,
-            'reappliedAt': FieldValue.serverTimestamp(),
-            // append timeline entry
+            'updatedAt': serverNow,
+            'reappliedAt': serverNow,
+            // append timeline entry (use concrete timestamp inside)
             'timeline': FieldValue.arrayUnion([timelineEntry]),
           };
           if (extra != null) updateData.addAll(extra);
@@ -107,14 +117,16 @@ class ApplicationService {
       throw Exception('Failed to verify existing applications');
     }
 
-    final createdValue = f.kIsWeb ? Timestamp.fromDate(DateTime.now().toUtc()) : FieldValue.serverTimestamp();
+    // For initial creation: use concrete timestamp for timeline entries, serverTimestamp for createdAt/updatedAt
+    final timelineTs = Timestamp.fromDate(DateTime.now().toUtc());
+    final serverNow = FieldValue.serverTimestamp();
 
     // Compose initial timeline entry, include optional note from extra if present
-    final String initialNote = (extra != null && (extra['note'] is String ? extra['note'] : (extra['message'] is String ? extra['message'] : ''))) as String? ?? '';
+    final String initialNote = _noteFromExtra(extra);
     final Map<String, dynamic> initialTimelineEntry = <String, dynamic>{
       'status': 'sent',
       'label': 'Application submitted',
-      'ts': createdValue,
+      'ts': timelineTs,
       'by': workerId,
       'note': initialNote,
     };
@@ -126,9 +138,9 @@ class ApplicationService {
       'workerId': workerId,
       'workerEmail': user.email ?? '',
       'status': 'sent',
-      'createdAt': createdValue,
-      'updatedAt': createdValue,
-      // initial timeline array
+      'createdAt': serverNow,
+      'updatedAt': serverNow,
+      // initial timeline array (use concrete timestamp)
       'timeline': [initialTimelineEntry],
     };
 
@@ -213,44 +225,34 @@ class ApplicationService {
         throw Exception('Application record not found');
       }
 
-      // Wrap the transaction call so we can convert any TimeoutException (or
-      // other non-JS-friendly error) into a plain Exception before it escapes.
-      try {
-        await _db.runTransaction((txn) async {
-          final ref = _db.collection('applications').doc(docId);
-          final snap = await txn.get(ref);
-          if (!snap.exists) {
-            throw Exception('Application already removed');
-          }
+      // Use a concrete Timestamp for timeline entries (arrayUnion doesn't accept serverTimestamp())
+      final timelineTs = Timestamp.fromDate(DateTime.now().toUtc());
 
-          final timelineEntry = <String, dynamic>{
-            'status': 'withdrawn',
-            'label': 'Application withdrawn',
-            'ts': FieldValue.serverTimestamp(),
-            'by': workerId,
-            'note': '',
-          };
-
-          txn.update(ref, {
-            'status': 'withdrawn',
-            'updatedAt': FieldValue.serverTimestamp(),
-            'withdrawnAt': FieldValue.serverTimestamp(),
-            'withdrawnBy': workerId,
-            'timeline': FieldValue.arrayUnion([timelineEntry]),
-          });
-        });
-      } catch (txnErr) {
-        // Convert TimeoutException (and similar) into a plain Exception on web.
-        if (f.kIsWeb) {
-          if (txnErr is TimeoutException || txnErr.toString().contains('TimeoutException')) {
-            throw Exception('Network timeout — please try again');
-          }
-          // If the caught object is some non-Dart/JS boxing issue, convert to string.
-          throw Exception(txnErr?.toString() ?? 'Failed to withdraw application');
+      await _db.runTransaction((txn) async {
+        final ref = _db.collection('applications').doc(docId);
+        final snap = await txn.get(ref);
+        if (!snap.exists) {
+          throw Exception('Application already removed');
         }
-        // Non-web: rethrow original error to preserve stack/message
-        rethrow;
-      }
+
+        // Prepare timeline entry for withdrawal (use concrete Timestamp for 'ts')
+        final timelineEntry = <String, dynamic>{
+          'status': 'withdrawn',
+          'label': 'Application withdrawn',
+          'ts': timelineTs,
+          'by': workerId,
+          'note': '',
+        };
+
+        txn.update(ref, {
+          'status': 'withdrawn',
+          'updatedAt': FieldValue.serverTimestamp(),
+          'withdrawnAt': FieldValue.serverTimestamp(),
+          'withdrawnBy': workerId,
+          // append timeline entry
+          'timeline': FieldValue.arrayUnion([timelineEntry]),
+        });
+      });
 
       f.debugPrint('ApplicationService.withdrawApplication: success doc=$docId');
     } on FirebaseException catch (e, st) {
@@ -258,10 +260,6 @@ class ApplicationService {
       throw Exception(e.message ?? 'Failed to withdraw application');
     } catch (err, st) {
       f.debugPrint('ApplicationService.withdrawApplication error: $err\n$st');
-      // Ensure we don't throw a TimeoutException instance that could be boxed.
-      if (err is TimeoutException || err.toString().contains('TimeoutException')) {
-        throw Exception('Network timeout — please try again');
-      }
       throw Exception(err?.toString() ?? 'Failed to withdraw application');
     }
   }
