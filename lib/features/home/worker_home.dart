@@ -337,6 +337,56 @@ class _MyApplicationsState extends State<_MyApplications> {
   final _auth = FirebaseAuth.instance;
   final _appSvc = ApplicationService();
 
+  // Helper: ensure shared employer cache has an entry for id (best-effort)
+  Future<void> _ensureEmployerLoaded(String id) async {
+    if (id.isEmpty) return;
+    if (_sharedEmployerCache.containsKey(id)) return;
+    if (_sharedLoadingEmployerIds.contains(id)) return;
+
+    _sharedLoadingEmployerIds.add(id);
+    try {
+      final Map<String, String?> result = {'name': null, 'avatar': null};
+
+      // Try users -> employers -> profiles (best effort)
+      final u = await _db.collection('users').doc(id).get();
+      final ud = u.data();
+      if (ud != null) {
+        result['name'] = (ud['displayName'] ?? ud['fullName'] ?? ud['name'] ?? ud['companyName'])?.toString();
+        result['avatar'] = (ud['photoUrl'] ?? ud['avatarUrl'] ?? ud['imageUrl'])?.toString();
+      }
+
+      if ((result['name'] == null || result['avatar'] == null)) {
+        final e = await _db.collection('employers').doc(id).get();
+        final ed = e.data();
+        if (ed != null) {
+          result['name'] ??= (ed['name'] ?? ed['companyName'] ?? ed['displayName'])?.toString();
+          result['avatar'] ??= (ed['logoUrl'] ?? ed['avatarUrl'] ?? ed['photoUrl'])?.toString();
+        }
+      }
+
+      if ((result['name'] == null || result['avatar'] == null)) {
+        final p = await _db.collection('profiles').doc(id).get();
+        final pd = p.data();
+        if (pd != null) {
+          result['name'] ??= (pd['displayName'] ?? pd['fullName'] ?? pd['name'])?.toString();
+          result['avatar'] ??= (pd['photoUrl'] ?? pd['avatarUrl'] ?? pd['imageUrl'])?.toString();
+        }
+      }
+
+      // normalize empty -> null
+      if (result['name'] != null && result['name']!.trim().isEmpty) result['name'] = null;
+      if (result['avatar'] != null && result['avatar']!.trim().isEmpty) result['avatar'] = null;
+
+      _sharedEmployerCache[id] = result;
+    } catch (e, st) {
+      debugPrint('Ensure employer load failed for $id: $e\n$st');
+      _sharedEmployerCache.putIfAbsent(id, () => {'name': null, 'avatar': null});
+    } finally {
+      _sharedLoadingEmployerIds.remove(id);
+      if (mounted) setState(() {});
+    }
+  }
+
   void _showTimeline(BuildContext context, Map<String, dynamic> application) {
     final timeline = (application['timeline'] as List<dynamic>?) ?? [];
     final entries = timeline.map((e) => Map<String, dynamic>.from(e as Map)).toList();
@@ -398,6 +448,20 @@ class _MyApplicationsState extends State<_MyApplications> {
     final location = vacancyData != null ? (vacancyData['location'] as String?) ?? '' : '';
     final deadline = vacancyData != null ? (vacancyData['applicationDeadline'] as Timestamp?)?.toDate() : null;
 
+    // Resolve employer info (prefer vacancyData, fall back to application, then shared cache)
+    final String? empId = (vacancyData != null ? (vacancyData['employerId'] as String?) : (application['employerId'] as String?));
+    String? employerName = (vacancyData != null ? (vacancyData['employerName'] as String?) : (application['employerName'] as String?));
+    String? employerAvatar = (vacancyData != null ? (vacancyData['employerAvatarUrl'] as String?) : (application['employerAvatarUrl'] as String?));
+
+    if ((employerName == null || employerName.isEmpty) && empId != null) employerName = _sharedEmployerCache[empId]?['name'];
+    if ((employerAvatar == null || employerAvatar.isEmpty) && empId != null) employerAvatar = _sharedEmployerCache[empId]?['avatar'];
+
+    // If missing and not already loading, trigger background load (best-effort)
+    if (empId != null && (employerAvatar == null || employerAvatar.isEmpty) && !_sharedLoadingEmployerIds.contains(empId) && !_sharedEmployerCache.containsKey(empId)) {
+      // fire-and-forget
+      _ensureEmployerLoaded(empId);
+    }
+
     return Card(
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -405,7 +469,12 @@ class _MyApplicationsState extends State<_MyApplications> {
         padding: const EdgeInsets.all(12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            CircleAvatar(radius: 22, child: Text(title.isNotEmpty ? title[0] : 'A')),
+            // show employer avatar if available, otherwise title initial
+            CircleAvatar(
+              radius: 22,
+              backgroundImage: (employerAvatar != null && employerAvatar.isNotEmpty) ? NetworkImage(employerAvatar) : null,
+              child: (employerAvatar == null || employerAvatar.isEmpty) ? Text((employerName ?? title)[0]) : null,
+            ),
             const SizedBox(width: 12),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
@@ -523,46 +592,46 @@ class _MyApplicationsState extends State<_MyApplications> {
     debugPrint('Withdraw: starting for applicationId=$applicationId vacancyId=$vacancyId worker=$uid');
 
     try {
-      // On web the cloud_firestore_web / interop layer has produced JS/Dart boxing errors.
-      // Use the local transactional fallback on web to avoid the service query path.
+      // Use concrete Timestamp for timeline entries (web doesn't accept serverTimestamp inside arrayUnion)
+      final timelineTs = Timestamp.fromDate(DateTime.now().toUtc());
+
       if (f.kIsWeb) {
         if (applicationId.isEmpty) {
           throw Exception('Missing applicationId for web fallback path');
         }
 
-        await _db.runTransaction((txn) async {
-          final ref = _db.collection('applications').doc(applicationId);
-          final snap = await txn.get(ref);
-          if (!snap.exists) throw Exception('Application not found');
-          final data = snap.data() ?? {};
-          final w1 = data['workerId'] as String?;
-          final w2 = data['worker'] as String?;
-          if (w1 != uid && w2 != uid) throw Exception('Not allowed');
+        final ref = _db.collection('applications').doc(applicationId);
 
-          final timelineEntry = <String, dynamic>{
-            'status': 'withdrawn',
-            'label': 'Application withdrawn',
-            'ts': FieldValue.serverTimestamp(),
-            'by': uid,
-            'note': '',
-          };
+        final snap = await ref.get();
+        if (!snap.exists) throw Exception('Application not found');
 
-          txn.update(ref, {
-            'status': 'withdrawn',
-            'updatedAt': FieldValue.serverTimestamp(),
-            'withdrawnAt': FieldValue.serverTimestamp(),
-            'withdrawnBy': uid,
-            'timeline': FieldValue.arrayUnion([timelineEntry]),
-          });
+        final data = snap.data() ?? {};
+        final w1 = data['workerId'] as String?;
+        final w2 = data['worker'] as String?;
+        if (w1 != uid && w2 != uid) throw Exception('Not allowed');
+
+        final timelineEntry = <String, dynamic>{
+          'status': 'withdrawn',
+          'label': 'Application withdrawn',
+          'ts': timelineTs,
+          'by': uid,
+          'note': '',
+        };
+
+        await ref.update({
+          'status': 'withdrawn',
+          'updatedAt': FieldValue.serverTimestamp(),
+          'withdrawnAt': FieldValue.serverTimestamp(),
+          'withdrawnBy': uid,
+          'timeline': FieldValue.arrayUnion([timelineEntry]),
         });
-        debugPrint('Withdraw: web fallback doc update succeeded for applicationId=$applicationId');
+
+        debugPrint('Withdraw: web non-transactional update succeeded for applicationId=$applicationId');
       } else {
-        // Native / non-web: use the ApplicationService path (keeps central logic)
         if (vacancyId != null && vacancyId.isNotEmpty) {
           await _appSvc.withdrawApplication(workerId: uid, vacancyId: vacancyId);
           debugPrint('Withdraw: service path succeeded for vacancyId=$vacancyId');
         } else {
-          // If vacancyId missing on non-web, fall back to applicationId transactional update
           await _db.runTransaction((txn) async {
             final ref = _db.collection('applications').doc(applicationId);
             final snap = await txn.get(ref);
@@ -575,7 +644,7 @@ class _MyApplicationsState extends State<_MyApplications> {
             final timelineEntry = <String, dynamic>{
               'status': 'withdrawn',
               'label': 'Application withdrawn',
-              'ts': FieldValue.serverTimestamp(),
+              'ts': timelineTs,
               'by': uid,
               'note': '',
             };
@@ -588,7 +657,7 @@ class _MyApplicationsState extends State<_MyApplications> {
               'timeline': FieldValue.arrayUnion([timelineEntry]),
             });
           });
-          debugPrint('Withdraw: fallback doc update succeeded for applicationId=$applicationId');
+          debugPrint('Withdraw: fallback transactional update succeeded for applicationId=$applicationId');
         }
       }
 
