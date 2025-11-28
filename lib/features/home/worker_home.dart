@@ -1,13 +1,25 @@
 // Worker home: Open Vacancies / My Applications with apply flow and employer batch lookups.
-// Simplified to use DefaultTabController to avoid TabController lifecycle issues.
+//
+// This file provides two tabs:
+//  - Open Vacancies: shows vacancies the worker hasn't applied to yet.
+//  - My Applications: shows worker's applications and timeline.
+//
+// Uses ApplicationService for create/withdraw operations and keeps a small employer cache
+// to reduce repeated user/profile lookups.
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-
+import 'package:flutter/foundation.dart' as f;
 import '../../widgets/user_avatar_button.dart';
+import '../../widgets/shimmer_placeholder.dart';
+import '../../widgets/chip_with_log.dart';
 import '../../services/application_service.dart';
-import 'vacancy_detail.dart';
+import '../vacancies/vacancy_detail_screen.dart';
+
+/// Shared employer cache that can be reused across screens while the app is running.
+final Map<String, Map<String, String?>> _sharedEmployerCache = {};
+final Set<String> _sharedLoadingEmployerIds = {};
 
 class WorkerHomeScreen extends StatelessWidget {
   const WorkerHomeScreen({super.key});
@@ -84,13 +96,15 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
         void process(DocumentSnapshot<Map<String, dynamic>> doc) {
           final d = doc.data() ?? {};
           final name = (d['name'] ?? d['displayName'] ?? d['fullName'] ?? d['companyName']) as String?;
-          final avatar = (d['avatarUrl'] ?? d['photoUrl'] ?? d['logoUrl'] ?? d['imageUrl'] ?? d['photo'] ?? d['logo']) as String?;
+          final avatar = (d['avatarUrl'] ?? d['photoUrl'] ?? d['logoUrl'] ?? d['imageUrl']) as String?;
           final existing = _employerCache[doc.id];
           _employerCache[doc.id] = {
             'name': (name?.trim().isNotEmpty == true ? name : existing?['name'])?.toString(),
             'avatar': (avatar?.trim().isNotEmpty == true ? avatar : existing?['avatar'])?.toString(),
           };
+          _sharedEmployerCache[doc.id] = _employerCache[doc.id] ?? {'name': null, 'avatar': null};
           _loadingEmployerIds.remove(doc.id);
+          _sharedLoadingEmployerIds.remove(doc.id);
         }
 
         for (final d in qUsers.docs) process(d);
@@ -98,43 +112,27 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
         for (final d in qProfiles.docs) process(d);
 
         for (final id in chunk) {
-          if (!_employerCache.containsKey(id)) {
-            _employerCache[id] = {'name': null, 'avatar': null};
-            _loadingEmployerIds.remove(id);
-          }
+          _loadingEmployerIds.remove(id);
+          _sharedLoadingEmployerIds.remove(id);
+          _employerCache.putIfAbsent(id, () => {'name': null, 'avatar': null});
+          _sharedEmployerCache.putIfAbsent(id, () => {'name': null, 'avatar': null});
         }
       }
 
       if (mounted) setState(() {});
-    } catch (_) {
-      for (final id in toLoad) _loadingEmployerIds.remove(id);
+    } catch (e, st) {
+      // Best-effort: clear loading flags on error.
+      for (final id in toLoad) {
+        _loadingEmployerIds.remove(id);
+        _sharedLoadingEmployerIds.remove(id);
+      }
+      // Log for debugging
+      debugPrint('Batch load employers failed: $e\n$st');
     }
   }
 
   Future<void> _expressInterest(String vacancyId, Map<String, dynamic> vacancyData) async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
-    final employerId = vacancyData['employerId'] as String?; // may be null
-    debugPrint('APPLY START: vacancy=$vacancyId worker=$uid employer=$employerId');
-
-    final dup = await _db.collection('applications').where('vacancyId', isEqualTo: vacancyId).where('workerId', isEqualTo: uid).limit(1).get();
-    if (dup.docs.isNotEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You have already applied.')));
-      // switch to My Applications tab
-      DefaultTabController.of(context)?.animateTo(1);
-      return;
-    }
-
-    final status = (vacancyData['status'] as String?) ?? 'open';
-    final slots = (vacancyData['slots'] as num?)?.toInt() ?? 0;
-    final deadline = (vacancyData['applicationDeadline'] as Timestamp?)?.toDate();
-    if (status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(DateTime.now()))) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This vacancy is not accepting applications.')));
-      return;
-    }
-
+    // confirm then call service (expressInterest reads currentUser internally)
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -149,32 +147,33 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     if (confirmed != true) return;
 
     try {
-      await _appSvc.createApplication(workerId: uid, vacancyId: vacancyId, employerId: employerId);
+      await _appSvc.expressInterest(vacancyId: vacancyId, employerId: vacancyData['employerId'] as String?);
+      if (!mounted) return;
       setState(() => _optimisticRemoved.add(vacancyId));
       DefaultTabController.of(context)?.animateTo(1);
-      debugPrint('APPLY SUCCESS: vacancy=$vacancyId');
-      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Application sent.')));
-    } on FirebaseException catch (e) {
-      debugPrint('APPLY ERROR: ${e.code} ${e.message}');
+    } on FirebaseException catch (e, st) {
+      debugPrint('APPLY FirebaseException: ${e.code} ${e.message}\n$st');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'Failed to apply')));
-    } catch (e) {
-      debugPrint('APPLY EXCEPTION: $e');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to apply: ${e.message ?? e.code}')));
+    } catch (e, st) {
+      debugPrint('APPLY error: $e\n$st');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to apply')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to apply: $e')));
     }
   }
 
   String _formatRange(Map<String, dynamic> data) {
-    final s = data['startAt'] as Timestamp?;
-    final e = data['endAt'] as Timestamp?;
+    Timestamp? s = data['startAt'] as Timestamp?;
+    Timestamp? e = data['endAt'] as Timestamp?;
+    final shift = data['shift'];
+    if (s == null && shift is Map && shift['startAt'] is Timestamp) s = shift['startAt'] as Timestamp?;
+    if (e == null && shift is Map && shift['endAt'] is Timestamp) e = shift['endAt'] as Timestamp?;
     if (s != null && e != null) return '${_dateTimeFmt.format(s.toDate())} - ${_dateTimeFmt.format(e.toDate())}';
     if (s != null) return _dateTimeFmt.format(s.toDate());
     return 'TBA';
   }
 
-  // Normalize location field which may be String or Map with name/lat/lng
   String _extractLocationString(Map<String, dynamic> data) {
     final locRaw = data['location'];
     if (locRaw == null) return '';
@@ -194,7 +193,6 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     }
   }
 
-  // Normalize dress code from various possible fields
   String _extractDressCode(Map<String, dynamic> data) {
     final v = data['dressCode'] ?? data['dress'] ?? data['dress_code'];
     if (v is String && v.trim().isNotEmpty) return v.trim();
@@ -208,7 +206,7 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     final location = _extractLocationString(data);
     final dressCode = _extractDressCode(data);
     final rate = data['ratePerHour'];
-    final slots = (data['slots'] as num?)?.toInt() ?? 0;
+    final slots = (data['slots'] is num) ? (data['slots'] as num).toInt() : int.tryParse((data['slots'] ?? '0').toString()) ?? 0;
     final status = (data['status'] as String?) ?? 'open';
     final deadline = (data['applicationDeadline'] as Timestamp?)?.toDate();
     final isClosed = status != 'open' || slots <= 0 || (deadline != null && deadline.isBefore(DateTime.now()));
@@ -217,9 +215,13 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
     String? employerName = (data['employerName'] as String?) ?? (data['employer'] as String?);
     String? employerAvatar = (data['employerAvatarUrl'] as String?) ?? (data['employerAvatar'] as String?);
 
-    if ((employerName == null || employerName.isEmpty) && employerId != null && _employerCache.containsKey(employerId)) {
-      employerName = _employerCache[employerId]?['name'];
-      employerAvatar = _employerCache[employerId]?['avatar'];
+    if ((employerName == null || employerName.isEmpty) && employerId != null) {
+      if (_employerCache.containsKey(employerId)) employerName = _employerCache[employerId]?['name'];
+      if ((employerName == null || employerName.isEmpty) && _sharedEmployerCache.containsKey(employerId)) employerName = _sharedEmployerCache[employerId]?['name'];
+    }
+    if ((employerAvatar == null || employerAvatar.isEmpty) && employerId != null) {
+      if (_employerCache.containsKey(employerId)) employerAvatar = _employerCache[employerId]?['avatar'];
+      if ((employerAvatar == null || employerAvatar.isEmpty) && _sharedEmployerCache.containsKey(employerId)) employerAvatar = _sharedEmployerCache[employerId]?['avatar'];
     }
 
     return Card(
@@ -229,24 +231,24 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
         padding: const EdgeInsets.all(12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            CircleAvatar(
-              radius: 22,
-              backgroundImage: (employerAvatar != null && employerAvatar.isNotEmpty) ? NetworkImage(employerAvatar) : null,
-              child: (employerAvatar == null || employerAvatar.isEmpty) ? Text((employerName ?? title)[0]) : null,
-            ),
+            if (employerId != null && _loadingEmployerIds.contains(employerId))
+              ShimmerPlaceholder.circle(size: 44, baseColor: Theme.of(context).colorScheme.surfaceVariant, highlightColor: Theme.of(context).colorScheme.surface)
+            else
+              CircleAvatar(
+                radius: 22,
+                backgroundImage: (employerAvatar != null && employerAvatar.isNotEmpty) ? NetworkImage(employerAvatar) : null,
+                child: (employerAvatar == null || employerAvatar.isEmpty) ? Text((employerName ?? title)[0]) : null,
+              ),
             const SizedBox(width: 12),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
               const SizedBox(height: 2),
-              Text(employerName ?? 'Employer', style: Theme.of(context).textTheme.bodySmall),
+              if (employerName != null) Text(employerName, style: Theme.of(context).textTheme.bodySmall),
             ])),
             FilledButton.icon(
               icon: Icon(isClosed ? Icons.block : Icons.check_circle, size: 18),
               label: Text(alreadyApplied ? 'Applied' : (isClosed ? 'Closed' : "I'm Interested")),
-              onPressed: (alreadyApplied || isClosed) ? null : () async {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Applying...')));
-                await _expressInterest(doc.id, data);
-              },
+              onPressed: (alreadyApplied || isClosed) ? null : () => _expressInterest(doc.id, data),
             ),
           ]),
           const SizedBox(height: 8),
@@ -255,11 +257,11 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
           if (desc.isNotEmpty) Text(desc, maxLines: 3, overflow: TextOverflow.ellipsis),
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
-            if (rate != null) Chip(label: Text('\$${rate.toString()} /hr')),
-            if (location.isNotEmpty) Chip(label: Text(location)),
-            if (dressCode.isNotEmpty) Chip(label: Text(dressCode)),
-            Chip(label: Text('Slots: $slots')),
-            if (deadline != null) Chip(label: Text('Apply by ${_dateFmt.format(deadline)}')),
+            if (rate != null) ChipWithLog(label: Text('\$${rate.toString()} /hr'), avatar: const Icon(Icons.attach_money, size: 16)),
+            if (location.isNotEmpty) ChipWithLog(label: Text(location), avatar: const Icon(Icons.place, size: 16)),
+            if (dressCode.isNotEmpty) ChipWithLog(label: Text(dressCode), avatar: const Icon(Icons.checkroom, size: 16)),
+            ChipWithLog(label: Text('Slots: $slots'), avatar: const Icon(Icons.group, size: 16)),
+            if (deadline != null) ChipWithLog(label: Text('Apply by ${_dateFmt.format(deadline)}'), avatar: const Icon(Icons.event_busy, size: 16)),
           ]),
         ]),
       ),
@@ -281,9 +283,8 @@ class _OpenVacanciesState extends State<_OpenVacancies> {
         if (appsSnap.hasData) {
           for (final d in appsSnap.data!.docs) {
             final data = d.data();
-            final status = (data['status'] as String?) ?? '';
-            // Exclude withdrawn/deleted applications so withdraw shows vacancy again.
-            if (status == 'withdrawn' || status == 'deleted') continue;
+            final st = (data['status'] as String?) ?? '';
+            if (st == 'withdrawn' || st == 'deleted') continue;
             final vid = data['vacancyId'] as String?;
             if (vid != null) applied.add(vid);
           }
@@ -335,24 +336,6 @@ class _MyApplicationsState extends State<_MyApplications> {
   final _db = FirebaseFirestore.instance;
   final _auth = FirebaseAuth.instance;
   final _appSvc = ApplicationService();
-  final Set<String> _optimisticWithdrawn = {};
-
-  Future<void> _withdraw(String vacancyId) async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
-    try {
-      await _appSvc.withdrawApplication(workerId: uid, vacancyId: vacancyId);
-      setState(() => _optimisticWithdrawn.add(vacancyId));
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Interest withdrawn')));
-    } on FirebaseException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'Failed to withdraw')));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to withdraw')));
-    }
-  }
 
   void _showTimeline(BuildContext context, Map<String, dynamic> application) {
     final timeline = (application['timeline'] as List<dynamic>?) ?? [];
@@ -384,8 +367,8 @@ class _MyApplicationsState extends State<_MyApplications> {
                   itemBuilder: (context, i) {
                     final e = entries[i];
                     final ts = e['ts'] as Timestamp?;
-                    final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : 'â€”';
-                    final label = e['status'] ?? 'update';
+                    final when = ts != null ? DateFormat.yMMMd().add_jm().format(ts.toDate()) : '—';
+                    final label = e['label'] ?? e['status'] ?? 'update';
                     final note = e['note'] ?? '';
                     return ListTile(
                       leading: const Icon(Icons.info_outline),
@@ -402,6 +385,70 @@ class _MyApplicationsState extends State<_MyApplications> {
     );
   }
 
+  Widget _applicationCard(BuildContext context, Map<String, dynamic> application, Map<String, dynamic>? vacancyData, String? vacancyId, String applicationId) {
+    final status = (application['status'] as String?) ?? 'pending';
+    final createdAt = (application['createdAt'] as Timestamp?)?.toDate();
+
+    // Ensure title and description are non-null and trimmed before use to satisfy null-safety.
+    final rawTitle = vacancyData != null ? (vacancyData['title'] as String?) : (application['vacancyTitle'] as String?);
+    final title = (rawTitle?.trim().isNotEmpty == true) ? rawTitle!.trim() : 'Applied role';
+
+    final desc = vacancyData != null ? (vacancyData['description'] as String?) ?? '' : '';
+    final rate = vacancyData != null ? vacancyData['ratePerHour'] : application['ratePerHour'];
+    final location = vacancyData != null ? (vacancyData['location'] as String?) ?? '' : '';
+    final deadline = vacancyData != null ? (vacancyData['applicationDeadline'] as Timestamp?)?.toDate() : null;
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            CircleAvatar(radius: 22, child: Text(title.isNotEmpty ? title[0] : 'A')),
+            const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              if (createdAt != null) Text(DateFormat.yMMMd().add_jm().format(createdAt), style: Theme.of(context).textTheme.bodySmall),
+            ])),
+            Column(mainAxisSize: MainAxisSize.min, children: [
+              if (status == 'shortlisted') ChipWithLog(label: const Text('Shortlisted'), backgroundColorStart: Colors.yellow.shade700, backgroundColorEnd: Colors.orange.shade700, avatar: const Icon(Icons.star, size: 16)),
+              const SizedBox(height: 6),
+              OutlinedButton.icon(onPressed: () => _showTimeline(context, application), icon: const Icon(Icons.timeline, size: 18), label: const Text('Timeline')),
+            ]),
+          ]),
+          const SizedBox(height: 8),
+          if (desc.isNotEmpty) Text(desc, maxLines: 3, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, children: [
+            if (rate != null) ChipWithLog(label: Text('\$${rate.toString()} /hr'), avatar: const Icon(Icons.attach_money, size: 16)),
+            if (location.isNotEmpty) ChipWithLog(label: Text(location), avatar: const Icon(Icons.place, size: 16)),
+            if (deadline != null) ChipWithLog(label: Text('Apply by ${DateFormat.yMMMd().format(deadline)}'), avatar: const Icon(Icons.event_busy, size: 16)),
+            ChipWithLog(label: Text('Status: $status'), avatar: const Icon(Icons.info_outline, size: 16)),
+          ]),
+          const SizedBox(height: 8),
+          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            // Use application document id as primary identifier; pass vacancyId as hint.
+            TextButton(
+              onPressed: applicationId.isEmpty
+                  ? null
+                  : () {
+                      // Immediate debug feedback so we know the handler fired
+                      final msg = 'Withdraw pressed — applicationId=$applicationId vacancyId=$vacancyId';
+                      debugPrint(msg);
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+                      // Then run the normal flow
+                      _withdraw(applicationId, vacancyId: vacancyId);
+                    },
+              child: const Text('Withdraw'),
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final uid = _auth.currentUser?.uid;
@@ -410,7 +457,6 @@ class _MyApplicationsState extends State<_MyApplications> {
     final appsStream = _db.collection('applications').where('workerId', isEqualTo: uid).orderBy('createdAt', descending: true).snapshots();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-
       stream: appsStream,
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
@@ -418,11 +464,9 @@ class _MyApplicationsState extends State<_MyApplications> {
 
         final docs = snap.data!.docs.where((d) {
           final data = d.data();
-          // hide withdrawn/deleted server-side records so they vanish from My Applications
-          final status = (data['status'] as String?) ?? '';
-          if (status == 'withdrawn' || status == 'deleted') return false;
-          final vid = data['vacancyId'] as String? ?? '';
-          return !_optimisticWithdrawn.contains(vid);
+          final s = (data['status'] as String?) ?? '';
+          if (s == 'withdrawn' || s == 'deleted') return false;
+          return true;
         }).toList();
 
         if (docs.isEmpty) return const Center(child: Text('No applications yet.'));
@@ -433,62 +477,132 @@ class _MyApplicationsState extends State<_MyApplications> {
           separatorBuilder: (_, __) => const SizedBox(height: 10),
           itemBuilder: (context, i) {
             final doc = docs[i];
-            final a = doc.data();
-            final status = (a['status'] as String?) ?? 'pending';
-            final createdAt = a['createdAt'];
-            final vacancyId = a['vacancyId'] as String?;
-
-            final futureVacancy = vacancyId == null
-                ? null
-                : FirebaseFirestore.instance.collection('vacancies').doc(vacancyId).get();
-
+            final app = doc.data();
+            final applicationId = doc.id;
+            final vacancyId = app['vacancyId'] as String?;
+            final futureVacancy = (vacancyId == null) ? null : FirebaseFirestore.instance.collection('vacancies').doc(vacancyId).get();
             return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>?>(
               future: futureVacancy,
               builder: (context, vSnap) {
-                String title = 'Applied role';
-                if (vSnap.hasData && vSnap.data?.data() != null) {
-                  title = (vSnap.data!.data()!['title'] as String?) ?? title;
-                }
-
-                final subtitle = (createdAt is Timestamp)
-                    ? 'Status: $status â€¢ ${DateFormat.yMMMd().add_jm().format(createdAt.toDate())}'
-                    : 'Status: $status';
-
-                return Card(
-                  elevation: 0,
-                  color: Theme.of(context).colorScheme.surface,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  child: ListTile(
-                    leading: status == 'shortlisted' ? Chip(label: const Text('Shortlisted'), backgroundColor: Colors.yellow.shade700) : null,
-                    title: Text(title),
-                    subtitle: Text(subtitle),
-                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                      IconButton(icon: const Icon(Icons.timeline), tooltip: 'Timeline', onPressed: () => _showTimeline(context, a)),
-                      TextButton(
-                        onPressed: vacancyId == null ? null : () async {
-                          final confirmed = await showDialog<bool>(
-                            context: context,
-                            builder: (c) => AlertDialog(
-                              title: const Text('Withdraw Interest'),
-                              content: const Text('Are you sure you want to withdraw your interest?'),
-                              actions: [
-                                TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
-                                TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Withdraw')),
-                              ],
-                            ),
-                          );
-                          if (confirmed == true && vacancyId != null) await _withdraw(vacancyId);
-                        },
-                        child: const Text('Withdraw'),
-                      ),
-                    ]),
-                  ),
-                );
+                Map<String, dynamic>? vacancyData;
+                if (vSnap.hasData && vSnap.data?.data() != null) vacancyData = vSnap.data!.data();
+                return _applicationCard(context, app, vacancyData, vacancyId, applicationId);
               },
             );
           },
         );
       },
     );
+  }
+
+  /// Unified withdraw helper.
+  /// Primary path: prefer using ApplicationService.withdrawApplication by vacancyId.
+  /// Fallback: update the application document directly using known applicationId.
+  Future<void> _withdraw(String applicationId, {String? vacancyId}) async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) {
+      debugPrint('Withdraw: no authenticated user');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Not signed in')));
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Withdraw Interest'),
+        content: const Text('Are you sure you want to withdraw your interest?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(c).pop(false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(c).pop(true), child: const Text('Withdraw')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    debugPrint('Withdraw: starting for applicationId=$applicationId vacancyId=$vacancyId worker=$uid');
+
+    try {
+      // On web the cloud_firestore_web / interop layer has produced JS/Dart boxing errors.
+      // Use the local transactional fallback on web to avoid the service query path.
+      if (f.kIsWeb) {
+        if (applicationId.isEmpty) {
+          throw Exception('Missing applicationId for web fallback path');
+        }
+
+        await _db.runTransaction((txn) async {
+          final ref = _db.collection('applications').doc(applicationId);
+          final snap = await txn.get(ref);
+          if (!snap.exists) throw Exception('Application not found');
+          final data = snap.data() ?? {};
+          final w1 = data['workerId'] as String?;
+          final w2 = data['worker'] as String?;
+          if (w1 != uid && w2 != uid) throw Exception('Not allowed');
+
+          final timelineEntry = <String, dynamic>{
+            'status': 'withdrawn',
+            'label': 'Application withdrawn',
+            'ts': FieldValue.serverTimestamp(),
+            'by': uid,
+            'note': '',
+          };
+
+          txn.update(ref, {
+            'status': 'withdrawn',
+            'updatedAt': FieldValue.serverTimestamp(),
+            'withdrawnAt': FieldValue.serverTimestamp(),
+            'withdrawnBy': uid,
+            'timeline': FieldValue.arrayUnion([timelineEntry]),
+          });
+        });
+        debugPrint('Withdraw: web fallback doc update succeeded for applicationId=$applicationId');
+      } else {
+        // Native / non-web: use the ApplicationService path (keeps central logic)
+        if (vacancyId != null && vacancyId.isNotEmpty) {
+          await _appSvc.withdrawApplication(workerId: uid, vacancyId: vacancyId);
+          debugPrint('Withdraw: service path succeeded for vacancyId=$vacancyId');
+        } else {
+          // If vacancyId missing on non-web, fall back to applicationId transactional update
+          await _db.runTransaction((txn) async {
+            final ref = _db.collection('applications').doc(applicationId);
+            final snap = await txn.get(ref);
+            if (!snap.exists) throw Exception('Application not found');
+            final data = snap.data() ?? {};
+            final w1 = data['workerId'] as String?;
+            final w2 = data['worker'] as String?;
+            if (w1 != uid && w2 != uid) throw Exception('Not allowed');
+
+            final timelineEntry = <String, dynamic>{
+              'status': 'withdrawn',
+              'label': 'Application withdrawn',
+              'ts': FieldValue.serverTimestamp(),
+              'by': uid,
+              'note': '',
+            };
+
+            txn.update(ref, {
+              'status': 'withdrawn',
+              'updatedAt': FieldValue.serverTimestamp(),
+              'withdrawnAt': FieldValue.serverTimestamp(),
+              'withdrawnBy': uid,
+              'timeline': FieldValue.arrayUnion([timelineEntry]),
+            });
+          });
+          debugPrint('Withdraw: fallback doc update succeeded for applicationId=$applicationId');
+        }
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Interest withdrawn')));
+      setState(() {});
+    } on FirebaseException catch (e, st) {
+      debugPrint('Withdraw FirebaseException: ${e.code} ${e.message}\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to withdraw: ${e.message ?? e.code}')));
+    } catch (e, st) {
+      debugPrint('Withdraw error: $e\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Withdraw failed: ${e.toString()}')));
+    }
   }
 }
