@@ -3,6 +3,7 @@
 // - Avatar + name shown inline in the AppBar; avatar is tappable and opens the menu.
 // - Improved visibility and a small fallback menu button when layout is constrained.
 // - IMPROVEMENT: Better loading states and error handling for avatars
+// - NEW: Account deletion option with consent dialog
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -72,6 +73,7 @@ String? _resolveNameFromDoc(Map<String, dynamic>? m) {
 /// - Small reusable avatar button that shows a popup menu.
 /// - Uses the global `appRouter` for navigation to avoid context-based GoRouter lookups.
 /// - IMPROVEMENT: Better loading states and graceful error handling
+/// - NEW: Account deletion functionality
 class UserAvatarButton extends StatefulWidget {
   const UserAvatarButton({super.key, this.basePath});
   final String? basePath;
@@ -93,7 +95,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   @override
   void initState() {
     super.initState();
-    // Try to refresh auth user first (provider may set photoURL asynchronously)
     FirebaseAuth.instance.currentUser?.reload().then((_) {
       debugPrint('UserAvatarButton: reloaded FirebaseAuth.currentUser');
       _resolveAuthPhotoIfNeeded();
@@ -103,7 +104,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     });
 
     _loadFallback();
-    // Rebuild when Firebase Auth user changes so photoURL/displayName updates immediately
     _authSub = FirebaseAuth.instance.userChanges().listen((_) {
       if (mounted) setState(() {});
       _resolveAuthPhotoIfNeeded();
@@ -119,14 +119,12 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   Future<String?> _resolvePhotoUrl(String? url) async {
     if (url == null) return null;
     try {
-      // gs:// URLs need conversion to HTTPS via Firebase Storage
       if (url.startsWith('gs://')) {
         final ref = FirebaseStorage.instance.refFromURL(url);
         final d = await ref.getDownloadURL();
         debugPrint('UserAvatarButton: resolved gs:// -> $d');
         return d;
       }
-      // If already https/http or data URI, return as-is
       return url;
     } catch (e) {
       debugPrint('UserAvatarButton: failed to resolve photo URL $url -> $e');
@@ -146,7 +144,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   }
 
   Future<void> _loadFallback() async {
-    // Avoid repeated attempts if a prior attempt already failed due to security rules.
     if (_fallbackLoadAttempted) {
       debugPrint('UserAvatarButton: _loadFallback skipped (already attempted)');
       return;
@@ -169,7 +166,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         debugPrint('UserAvatarButton: usersData fallbackName=$_fallbackName fallbackPhoto=$_fallbackPhoto fallbackRole=$_fallbackRole');
       }
 
-      // Also check employers collection (if user is an employer)
       if ((_fallbackPhoto == null || _fallbackName == null)) {
         final emplDoc = await FirebaseFirestore.instance.collection('employers').doc(uid).get();
         final eData = emplDoc.data();
@@ -181,7 +177,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         }
       }
 
-      // Also check profiles collection
       if ((_fallbackPhoto == null || _fallbackName == null)) {
         final profilesDoc = await FirebaseFirestore.instance.collection('profiles').doc(uid).get();
         final pData = profilesDoc.data();
@@ -193,7 +188,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         }
       }
 
-      // NEW: Also check workers collection (some flows write worker profile/avatar here)
       if ((_fallbackPhoto == null || _fallbackName == null)) {
         final workerDoc = await FirebaseFirestore.instance.collection('workers').doc(uid).get();
         final wData = workerDoc.data();
@@ -205,7 +199,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         }
       }
 
-      // If fallback photo uses gs:// convert it to https
       if (_fallbackPhoto != null && _fallbackPhoto!.startsWith('gs://')) {
         final resolved = await _resolvePhotoUrl(_fallbackPhoto);
         if (resolved != null) {
@@ -214,7 +207,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         }
       }
     } catch (e, st) {
-      // If permission denied, avoid noisy retries and mark as failed.
       try {
         if (e is FirebaseException && e.code == 'permission-denied') {
           debugPrint('UserAvatarButton: _loadFallback permission-denied: $e');
@@ -228,7 +220,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     }
     debugPrint('UserAvatarButton: final fallbackPhoto=$_fallbackPhoto fallbackName=$_fallbackName');
     if (mounted) setState(() {});
-    // also pre-warm cached role from the role service if not set
     try {
       final role = await UserRoleService.instance.getRole();
       if (mounted && role != null) {
@@ -353,6 +344,9 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         PopupMenuItem(value: 'profile', child: Row(children: [Icon(Icons.edit, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Edit Profile')])),
         PopupMenuItem(value: 'settings', child: Row(children: [Icon(Icons.settings, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Settings')])),
         const PopupMenuDivider(),
+        // NEW: Delete Account option
+        PopupMenuItem(value: 'delete_account', child: Row(children: [Icon(Icons.delete_forever, size: 20, color: Theme.of(context).colorScheme.error), const SizedBox(width: 12), Text('Delete Account', style: TextStyle(color: Theme.of(context).colorScheme.error))])),
+        const PopupMenuDivider(),
         PopupMenuItem(value: 'logout', child: Row(children: [Icon(Icons.logout, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Logout')])),
       ];
 
@@ -364,6 +358,165 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
       if (selected != null) _onSelected(selected);
     } catch (e) {
       debugPrint('UserAvatarButton: showMenu error: $e');
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    // Step 1: Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete Account?'),
+        content: const Text(
+          'This will permanently delete your account and all associated data including:\n\n'
+          '• Profile information\n'
+          '• Applications\n'
+          '• Posted vacancies (if employer)\n'
+          '• Uploaded documents\n\n'
+          'This action cannot be undone!',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Theme.of(c).colorScheme.error),
+            child: const Text('Delete Forever'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    // Step 2: Show progress dialog
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Expanded(child: Text('Deleting your account...')),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('Not signed in');
+
+      final uid = user.uid;
+
+      // Step 3: Delete Firestore documents
+      final batch = FirebaseFirestore.instance.batch();
+
+      // Delete user collections
+      batch.delete(FirebaseFirestore.instance.collection('users').doc(uid));
+      batch.delete(FirebaseFirestore.instance.collection('workers').doc(uid));
+      batch.delete(FirebaseFirestore.instance.collection('employers').doc(uid));
+      batch.delete(FirebaseFirestore.instance.collection('profiles').doc(uid));
+
+      // Delete applications where user is the worker
+      final applicationsQuery = await FirebaseFirestore.instance
+          .collection('applications')
+          .where('workerId', isEqualTo: uid)
+          .get();
+      for (final doc in applicationsQuery.docs) {
+        batch.delete(doc.reference);
+      }
+
+      // Delete vacancies where user is the employer
+      final vacanciesQuery = await FirebaseFirestore.instance
+          .collection('vacancies')
+          .where('employerId', isEqualTo: uid)
+          .get();
+      for (final doc in vacanciesQuery.docs) {
+        batch.delete(doc.reference);
+      }
+
+      // Commit Firestore deletions
+      await batch.commit();
+
+      // Step 4: Delete Storage files (avatar, documents)
+      try {
+        final storageRef = FirebaseStorage.instance.ref();
+        
+        // Delete avatars
+        final avatarRef = storageRef.child('avatars').child(uid);
+        final avatarList = await avatarRef.listAll();
+        for (final item in avatarList.items) {
+          await item.delete();
+        }
+
+        // Delete worker documents
+        final docsRef = storageRef.child('workerDocs').child(uid);
+        final docsList = await docsRef.listAll();
+        for (final item in docsList.items) {
+          await item.delete();
+        }
+
+        // Delete profiles
+        final profilesRef = storageRef.child('profiles').child(uid);
+        final profilesList = await profilesRef.listAll();
+        for (final item in profilesList.items) {
+          await item.delete();
+        }
+      } catch (storageError) {
+        debugPrint('Storage deletion error (non-fatal): $storageError');
+        // Continue even if storage deletion fails
+      }
+
+      // Step 5: Delete Firebase Auth user
+      await user.delete();
+
+      // Step 6: Close progress dialog and navigate to login
+      if (!mounted) return;
+      Navigator.of(context).pop(); // Close progress dialog
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account deleted successfully')),
+      );
+
+      // Navigate to login
+      try {
+        rg.appRouter.go('/auth-external');
+      } catch (_) {
+        try {
+          NavigationService.instance.go('/auth-external');
+        } catch (_) {
+          Navigator.of(context).pushNamedAndRemoveUntil('/auth-external', (r) => false);
+        }
+      }
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // Close progress dialog
+      
+      String errorMsg = 'Failed to delete account';
+      if (e.code == 'requires-recent-login') {
+        errorMsg = 'Please sign out and sign in again before deleting your account';
+      } else {
+        errorMsg = 'Failed to delete account: ${e.message}';
+      }
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(errorMsg), backgroundColor: Theme.of(context).colorScheme.error),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // Close progress dialog
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to delete account: $e'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+        ),
+      );
     }
   }
 
@@ -427,7 +580,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
           }
           break;
         case 'profile':
-          // Resolve persisted role and navigate to the appropriate profile edit
           try {
             final uid = FirebaseAuth.instance.currentUser?.uid;
             String role = '';
@@ -461,10 +613,12 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
             Navigator.of(context).pushNamed('/settings');
           }
           break;
+        case 'delete_account':
+          await _deleteAccount();
+          break;
         case 'logout':
           await FirebaseAuth.instance.signOut();
           try {
-            // route to embedded login (external-auth entry) after logout
             rg.appRouter.go('/auth-external');
           } catch (_) {
             try {
@@ -476,7 +630,6 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
           break;
       }
     } catch (e) {
-      // ignore: avoid_print
       print('Avatar menu navigation error: $e');
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Navigation Failed: ${e.toString()}')));
     }
@@ -487,21 +640,14 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     final displayName = _displayName();
     final photo = _photoUrl();
 
-    // Show avatar with name stacked vertically. Use LayoutBuilder to pick a safe avatar radius so
-    // the combined avatar + name fits inside AppBar toolbar height to avoid overflow.
     return Padding(
       padding: const EdgeInsets.only(right: 12.0),
       child: LayoutBuilder(builder: (context, constraints) {
-        // Use the available height if provided by parent; otherwise fall back to a sensible toolbar height.
         final availableHeight = (constraints.maxHeight.isFinite && constraints.maxHeight > 0) ? constraints.maxHeight : kToolbarHeight;
-        // Reserve some vertical space for the name text (if present) and small spacing.
         final reservedForName = (displayName.isNotEmpty) ? 16.0 + 4.0 : 0.0;
-        // Compute avatar diameter from remaining space and clamp to a reasonable range.
         final avatarDiameter = ((availableHeight - reservedForName)).clamp(32.0, 44.0);
         final avatarRadius = avatarDiameter / 2.0;
 
-        // Compute a more generous max width for the name: prefer the parent's available width if present,
-        // otherwise fall back to a fraction of screen width. Cap to avoid abusing layout.
         final screen = MediaQuery.of(context).size.width;
         final parentMaxWidth = (constraints.maxWidth.isFinite && constraints.maxWidth > 0) ? constraints.maxWidth : (screen * 0.32);
         final maxNameWidth = parentMaxWidth.clamp(80.0, 320.0);
@@ -510,10 +656,8 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // We use GestureDetector so we can showMenu anchored to the avatar bounds as a robust fallback.
             GestureDetector(
               onTapDown: (details) async {
-                // Primary path: open the popup menu anchored to the tap position.
                 await _showMenu(context, details.globalPosition);
               },
               child: _avatar(context, avatarRadius, displayName, photo),
