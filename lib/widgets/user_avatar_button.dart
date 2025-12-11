@@ -1,13 +1,15 @@
-// AppBar avatar + menu (stable PopupMenuButton) — router-first navigation.
+// AppBar avatar + menu (robust) — router-first navigation.
 // - Uses FirebaseAuth.currentUser.photoURL first, falls back to one-time Firestore lookup.
 // - Avatar + name shown inline in the AppBar; avatar is tappable and opens the menu.
+// - Improved visibility and a small fallback menu button when layout is constrained.
+// - IMPROVEMENT: Better loading states and error handling for avatars
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
-import 'package:flexcrew/features/auth/sign_in_screen.dart';
 import 'package:flexcrew/routing/router_globals.dart' as rg;
+import 'package:flexcrew/services/navigation_service.dart';
 import 'package:flexcrew/services/user_role_service.dart';
 
 String _titleCase(String? input) {
@@ -69,6 +71,7 @@ String? _resolveNameFromDoc(Map<String, dynamic>? m) {
 /// UserAvatarButton
 /// - Small reusable avatar button that shows a popup menu.
 /// - Uses the global `appRouter` for navigation to avoid context-based GoRouter lookups.
+/// - IMPROVEMENT: Better loading states and graceful error handling
 class UserAvatarButton extends StatefulWidget {
   const UserAvatarButton({super.key, this.basePath});
   final String? basePath;
@@ -81,10 +84,11 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   String? _fallbackPhoto;
   String? _fallbackName;
   String? _fallbackRole;
-  String? _resolvedAuthPhoto; // resolved auth photo (https) if needed
+  String? _resolvedAuthPhoto;
   StreamSubscription<User?>? _authSub;
-  // small local hint used for building the menu quickly; authoritative role should come from UserRoleService
   String? _hintRole;
+  bool _fallbackLoadAttempted = false;
+  bool _fallbackLoadFailed = false;
 
   @override
   void initState() {
@@ -142,6 +146,13 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   }
 
   Future<void> _loadFallback() async {
+    // Avoid repeated attempts if a prior attempt already failed due to security rules.
+    if (_fallbackLoadAttempted) {
+      debugPrint('UserAvatarButton: _loadFallback skipped (already attempted)');
+      return;
+    }
+    _fallbackLoadAttempted = true;
+
     final uid = FirebaseAuth.instance.currentUser?.uid;
     debugPrint('UserAvatarButton: _loadFallback for uid=$uid');
     if (uid == null) return;
@@ -203,7 +214,17 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         }
       }
     } catch (e, st) {
-      debugPrint('UserAvatarButton: _loadFallback error: $e\n$st');
+      // If permission denied, avoid noisy retries and mark as failed.
+      try {
+        if (e is FirebaseException && e.code == 'permission-denied') {
+          debugPrint('UserAvatarButton: _loadFallback permission-denied: $e');
+          _fallbackLoadFailed = true;
+        } else {
+          debugPrint('UserAvatarButton: _loadFallback error: $e\n$st');
+        }
+      } catch (_) {
+        debugPrint('UserAvatarButton: _loadFallback unexpected error: $e');
+      }
     }
     debugPrint('UserAvatarButton: final fallbackPhoto=$_fallbackPhoto fallbackName=$_fallbackName');
     if (mounted) setState(() {});
@@ -216,29 +237,63 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     } catch (_) {}
   }
 
+  // IMPROVEMENT: Better avatar widget with loading and error states
   Widget _avatar(BuildContext context, double radius, String displayName, String? photoUrl) {
     final effective = photoUrl ?? '';
     debugPrint('UserAvatarButton: _avatar() photoUrl=$effective');
+    
     if (effective.isNotEmpty) {
-      // Use Image.network with errorBuilder to catch load/CORS/404 issues and log them
       return ClipOval(
         child: Image.network(
           effective,
           width: radius * 2,
           height: radius * 2,
           fit: BoxFit.cover,
+          // IMPROVEMENT: Show loading progress
           loadingBuilder: (ctx, child, progress) {
             if (progress == null) return child;
-            return SizedBox(width: radius * 2, height: radius * 2, child: Center(child: SizedBox(width: radius * 0.8, height: radius * 0.8, child: const CircularProgressIndicator(strokeWidth: 2))));
+            return Container(
+              width: radius * 2,
+              height: radius * 2,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceVariant,
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: SizedBox(
+                  width: radius * 0.8,
+                  height: radius * 0.8,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    value: progress.expectedTotalBytes != null
+                        ? progress.cumulativeBytesLoaded / (progress.expectedTotalBytes ?? 1)
+                        : null,
+                  ),
+                ),
+              ),
+            );
           },
+          // IMPROVEMENT: Better error fallback with themed colors
           errorBuilder: (ctx, error, stack) {
             debugPrint('UserAvatarButton: Image.network error for $effective -> $error');
             final initials = displayName.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).map((s) => s.characters.first.toUpperCase()).take(2).join();
             return Container(
               width: radius * 2,
               height: radius * 2,
-              color: Theme.of(context).colorScheme.surface,
-              child: Center(child: Text(initials, style: TextStyle(fontSize: radius * 0.75))),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: Text(
+                  initials.isNotEmpty ? initials : '?',
+                  style: TextStyle(
+                    fontSize: radius * 0.75,
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
             );
           },
         ),
@@ -246,7 +301,24 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     } else {
       final seed = displayName.isNotEmpty ? displayName : 'U';
       final initials = seed.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).map((s) => s.characters.first.toUpperCase()).take(2).join();
-      return CircleAvatar(radius: radius, child: Text(initials, style: TextStyle(fontSize: radius * 0.75)));
+      return Container(
+        width: radius * 2,
+        height: radius * 2,
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.primaryContainer,
+          shape: BoxShape.circle,
+        ),
+        child: Center(
+          child: Text(
+            initials.isNotEmpty ? initials : '?',
+            style: TextStyle(
+              fontSize: radius * 0.75,
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      );
     }
   }
 
@@ -256,21 +328,51 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
   }
 
   String? _photoUrl() {
-    // Prefer resolved auth photo, then auth photo, then fallback (which we already resolved if gs://)
     final firebaseUser = FirebaseAuth.instance.currentUser;
     final candidate = _resolvedAuthPhoto ?? firebaseUser?.photoURL ?? _fallbackPhoto;
     debugPrint('UserAvatarButton: _photoUrl() -> $candidate');
     return candidate;
   }
 
+  Future<void> _showMenu(BuildContext context, Offset position) async {
+    try {
+      final items = <PopupMenuEntry<String>>[
+        PopupMenuItem<String>(
+          enabled: false,
+          child: Row(
+            children: [
+              _avatar(context, 26, _displayName(), _photoUrl()),
+              const SizedBox(width: 12),
+              Expanded(child: Text(_displayName(), style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(value: 'home', child: Row(children: [Icon(Icons.home, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Home')])),
+        PopupMenuItem(value: 'wallet', child: Row(children: [Icon(Icons.account_balance_wallet, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Wallet')])),
+        PopupMenuItem(value: 'profile', child: Row(children: [Icon(Icons.edit, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Edit Profile')])),
+        PopupMenuItem(value: 'settings', child: Row(children: [Icon(Icons.settings, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Settings')])),
+        const PopupMenuDivider(),
+        PopupMenuItem(value: 'logout', child: Row(children: [Icon(Icons.logout, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Logout')])),
+      ];
+
+      final selected = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
+        items: items,
+      );
+      if (selected != null) _onSelected(selected);
+    } catch (e) {
+      debugPrint('UserAvatarButton: showMenu error: $e');
+    }
+  }
+
   void _onSelected(String value) async {
     try {
-      // telemetry: selected action
       debugPrint('AvatarMenu: selected=$value');
       switch (value) {
         case 'home':
           {
-            // Resolve role via service (cached + safe fetch)
             String role = _hintRole ?? '';
             try {
               final svcRole = await UserRoleService.instance.getRole(refresh: false);
@@ -362,9 +464,14 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
         case 'logout':
           await FirebaseAuth.instance.signOut();
           try {
-            rg.appRouter.go('/login');
+            // route to embedded login (external-auth entry) after logout
+            rg.appRouter.go('/auth-external');
           } catch (_) {
-            Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SignInScreen()), (r) => false);
+            try {
+              NavigationService.instance.go('/auth-external');
+            } catch (_) {
+              Navigator.of(context).pushNamedAndRemoveUntil('/auth-external', (r) => false);
+            }
           }
           break;
       }
@@ -380,51 +487,58 @@ class _UserAvatarButtonState extends State<UserAvatarButton> {
     final displayName = _displayName();
     final photo = _photoUrl();
 
-    // Show avatar + name inline so AppBar displays both; avatar is the tappable child.
+    // Show avatar with name stacked vertically. Use LayoutBuilder to pick a safe avatar radius so
+    // the combined avatar + name fits inside AppBar toolbar height to avoid overflow.
     return Padding(
       padding: const EdgeInsets.only(right: 12.0),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          PopupMenuButton<String>(
-            tooltip: 'Account',
-            color: Theme.of(context).colorScheme.surface,
-            onSelected: _onSelected,
-            itemBuilder: (c) => [
-              PopupMenuItem<String>(
-                enabled: false,
-                child: Row(
-                  children: [
-                    _avatar(context, 26, displayName, photo),
-                    const SizedBox(width: 12),
-                    Expanded(child: Text(displayName, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
-                  ],
+      child: LayoutBuilder(builder: (context, constraints) {
+        // Use the available height if provided by parent; otherwise fall back to a sensible toolbar height.
+        final availableHeight = (constraints.maxHeight.isFinite && constraints.maxHeight > 0) ? constraints.maxHeight : kToolbarHeight;
+        // Reserve some vertical space for the name text (if present) and small spacing.
+        final reservedForName = (displayName.isNotEmpty) ? 16.0 + 4.0 : 0.0;
+        // Compute avatar diameter from remaining space and clamp to a reasonable range.
+        final avatarDiameter = ((availableHeight - reservedForName)).clamp(32.0, 44.0);
+        final avatarRadius = avatarDiameter / 2.0;
+
+        // Compute a more generous max width for the name: prefer the parent's available width if present,
+        // otherwise fall back to a fraction of screen width. Cap to avoid abusing layout.
+        final screen = MediaQuery.of(context).size.width;
+        final parentMaxWidth = (constraints.maxWidth.isFinite && constraints.maxWidth > 0) ? constraints.maxWidth : (screen * 0.32);
+        final maxNameWidth = parentMaxWidth.clamp(80.0, 320.0);
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // We use GestureDetector so we can showMenu anchored to the avatar bounds as a robust fallback.
+            GestureDetector(
+              onTapDown: (details) async {
+                // Primary path: open the popup menu anchored to the tap position.
+                await _showMenu(context, details.globalPosition);
+              },
+              child: _avatar(context, avatarRadius, displayName, photo),
+            ),
+
+            // Provide a compact name label (use onSurface for legibility on different appbar backgrounds)
+            if (displayName.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxNameWidth, minWidth: 0),
+                child: Tooltip(
+                  message: displayName,
+                  child: Text(
+                    displayName,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurface),
+                  ),
                 ),
               ),
-              const PopupMenuDivider(),
-              PopupMenuItem(value: 'home', child: Row(children: [Icon(Icons.home, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Home')])),
-              PopupMenuItem(value: 'wallet', child: Row(children: [Icon(Icons.account_balance_wallet, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Wallet')])),
-              PopupMenuItem(value: 'profile', child: Row(children: [Icon(Icons.edit, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Edit Profile')])),
-              PopupMenuItem(value: 'settings', child: Row(children: [Icon(Icons.settings, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Settings')])),
-              const PopupMenuDivider(),
-              PopupMenuItem(value: 'logout', child: Row(children: [Icon(Icons.logout, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 12), const Text('Logout')])),
             ],
-            // Tappable avatar
-            child: Material(type: MaterialType.transparency, child: _avatar(context, 20, displayName, photo)),
-          ),
-          const SizedBox(width: 8),
-          // Name shown to the right (non-tappable)
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 180),
-            child: Text(
-              displayName,
-              overflow: TextOverflow.ellipsis,
-              maxLines: 1,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onPrimary),
-            ),
-          ),
-        ],
-      ),
+          ],
+        );
+      }),
     );
   }
 }

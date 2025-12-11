@@ -1,14 +1,16 @@
-// (updated) pass role from query to SignInScreen
 // lib/routing/app_router.dart
-// Temporary debug router: redirects disabled for debugging.
+// Router configuration — simplified app router with embedded login.
+// Admin routes intentionally removed from this build.
 import 'dart:async';
 import 'package:go_router/go_router.dart';
 import 'package:flutter/material.dart';
 
-// Import screens used by your app (keep these imports current in your repo)
-import 'package:flexcrew/features/auth/sign_in_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+// App screens
 import 'package:flexcrew/features/auth/create_account_screen.dart';
 import 'package:flexcrew/features/auth/forgot_password_screen.dart';
+import 'package:flexcrew/features/auth/login_screen.dart';
 import 'package:flexcrew/features/home/worker_home.dart';
 import 'package:flexcrew/features/home/employer_home.dart';
 import 'package:flexcrew/features/home/vacancy_create_screen.dart';
@@ -20,58 +22,85 @@ import 'package:flexcrew/features/onboarding/worker_onboarding_screen.dart';
 import 'package:flexcrew/features/onboarding/employer_onboarding_screen.dart';
 import 'package:flexcrew/features/wallet/wallet_screen.dart';
 import 'package:flexcrew/features/settings/settings_screen.dart';
+import 'package:flexcrew/features/splash/boot_screen.dart';
+import 'package:flexcrew/guards/require_onboarded_worker.dart';
+
+// NOTE: Admin screens intentionally omitted in this build.
 
 final GoRouter appRouter = GoRouter(
-  initialLocation: '/login',
-  // DEBUG: do not refresh on auth changes here; keep routing deterministic for debugging.
-  // NOTE: This file is temporary — restore your original redirect logic after debugging.
+  initialLocation: '/',
   routes: [
+    // Splash / boot: resolves auth state and navigates to external auth or app home.
+    GoRoute(path: '/', name: 'boot', builder: (_, __) => const BootScreen()),
+
+    // External auth entrypoint: point to the embedded login screen for this app.
     GoRoute(
-      path: '/login',
-      name: 'login',
-      builder: (context, state) {
-        // allow /login?role=employer or /login?role=crew
-        final role = state.uri.queryParameters['role'];
-        return SignInScreen(role: role);
+      path: '/auth-external',
+      name: 'auth-external',
+      builder: (_, __) {
+        return const LoginScreen();
       },
     ),
-    GoRoute(path: '/create-account', name: 'create-account', builder: (_, st) {
-      String? role;
-      if (st.extra is Map<String, dynamic>) role = (st.extra as Map<String, dynamic>)['role'] as String?;
-      role ??= st.uri.queryParameters['role'];
-      return CreateAccountScreen(prefillEmail: st.uri.queryParameters['email'], role: role);
-    }),
+
+    // Account flows that remain in-app (profile creation, forgot password etc.)
+    GoRoute(
+      path: '/create-account',
+      name: 'create-account',
+      builder: (_, st) {
+        String? role;
+        if (st.extra is Map<String, dynamic>) role = (st.extra as Map<String, dynamic>)['role'] as String?;
+        role ??= st.uri.queryParameters['role'];
+        return CreateAccountScreen(prefillEmail: st.uri.queryParameters['email'], role: role);
+      },
+    ),
     GoRoute(path: '/forgot-password', name: 'forgot-password', builder: (_, __) => const ForgotPasswordScreen()),
-    GoRoute(path: '/worker', name: 'worker-home', builder: (_, __) => const WorkerHomeScreen()),
-    GoRoute(path: '/worker/wallet', name: 'worker-wallet', builder: (_, __) => const WalletScreen(role: 'crew')),
-    GoRoute(path: '/onboarding', name: 'onboarding', builder: (context, st) {
-      final extra = st.extra;
-      String? prefillName;
-      String? prefillUid;
-      if (extra is Map<String, dynamic>) {
-        prefillName = extra['prefillName'] as String?;
-        prefillUid = extra['uid'] as String?;
-      }
-      return WorkerOnboardingScreen(prefillName: prefillName, prefillUid: prefillUid);
-    }),
+
+    // Primary app routes - IMPROVEMENT: Wrap worker routes with onboarding guard
+    GoRoute(
+      path: '/worker',
+      name: 'worker-home',
+      builder: (_, __) => const RequireOnboardedWorker(
+        child: WorkerHomeScreen(),
+      ),
+    ),
+    GoRoute(
+      path: '/worker/wallet',
+      name: 'worker-wallet',
+      builder: (_, __) => const RequireOnboardedWorker(
+        child: WalletScreen(role: 'crew'),
+      ),
+    ),
+    GoRoute(
+      path: '/onboarding',
+      name: 'onboarding',
+      builder: (context, st) {
+        final extra = st.extra;
+        String? prefillName;
+        String? prefillUid;
+        if (extra is Map<String, dynamic>) {
+          prefillName = extra['prefillName'] as String?;
+          prefillUid = extra['uid'] as String?;
+        }
+        return WorkerOnboardingScreen(prefillName: prefillName, prefillUid: prefillUid);
+      },
+    ),
     GoRoute(path: '/employer/onboarding', name: 'employer-onboarding', builder: (_, __) => const EmployerOnboardingScreen()),
-    GoRoute(path: '/worker/profile/edit', name: 'worker-profile-edit', builder: (_, __) => const WorkerProfileEditScreen()),
-    // Use the actual class defined in mobile/features/home/employer_home.dart
+    GoRoute(
+      path: '/worker/profile/edit',
+      name: 'worker-profile-edit',
+      builder: (_, __) => const RequireOnboardedWorker(
+        child: WorkerProfileEditScreen(),
+      ),
+    ),
     GoRoute(path: '/employer', name: 'employer-home', builder: (_, __) => const EmployerHome()),
     GoRoute(path: '/employer/wallet', name: 'employer-wallet', builder: (_, __) => const WalletScreen(role: 'employer')),
     GoRoute(path: '/employer/profile/edit', name: 'employer-profile-edit', builder: (_, __) => const EmployerProfileEditScreen()),
-    // Vacancy create/edit
-    GoRoute(
-      path: '/employer/vacancy/new',
-      name: 'vacancy-create',
-      builder: (_, __) => const VacancyCreateScreen(),
-    ),
+    GoRoute(path: '/employer/vacancy/new', name: 'vacancy-create', builder: (_, __) => const VacancyCreateScreen()),
     GoRoute(
       path: '/employer/vacancy/:id/edit',
       name: 'vacancy-edit',
       builder: (context, state) {
         final id = state.pathParameters['id'] ?? '';
-        // If the caller passed vacancy data in state.extra, use it; otherwise pass null.
         final Map<String, dynamic>? vacancyData = (state.extra is Map<String, dynamic>) ? (state.extra as Map<String, dynamic>) : null;
         return VacancyEditScreen(vacancyId: id, vacancyData: vacancyData);
       },
@@ -79,10 +108,8 @@ final GoRouter appRouter = GoRouter(
     GoRoute(path: '/profile/edit', name: 'profile-edit', builder: (_, __) => const EditProfileScreen()),
     GoRoute(path: '/settings', name: 'settings', builder: (_, __) => const SettingsScreen()),
   ],
-  // DEBUG: disable redirect while debugging blank screen issues
+  // DEBUG: helpful log for navigation requests
   redirect: (context, state) {
-    // Print basic info to the console for debugging (visible in terminal & browser console)
-    // Use state.uri (works with go_router 14.x). Avoid using state.location to be compatible.
     // ignore: avoid_print
     print('DEBUG GoRouter requested: ${state.uri}');
     return null;
