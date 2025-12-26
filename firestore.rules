@@ -2,25 +2,29 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Authenticated user may read/write their own users doc
+    // Users collection: users can read/write their own document
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Authenticated user may read/write their worker profile
-    match /workers/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    // Workers collection: ANYONE authenticated can read (for employer lookups)
+    // Only the worker can write their own document
+    match /workers/{workerId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == workerId;
     }
 
-    // Authenticated user may read/write their employer profile
-    match /employers/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    // Employers collection: ANYONE authenticated can read (for worker lookups)
+    // Only the employer can write their own document
+    match /employers/{employerId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == employerId;
     }
 
     // Vacancies: public reads, only employer may write
     match /vacancies/{vacancyId} {
       allow read: if true;
-      allow create: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.employerId == request.auth.uid;
       allow update, delete: if request.auth != null && request.auth.uid == resource.data.employerId;
     }
 
@@ -30,11 +34,16 @@ service cloud.firestore {
       allow create: if request.auth != null && 
                     request.resource.data.workerId == request.auth.uid;
       
-      // Workers can read/update their own applications
-      // Employers can read/update applications for their vacancies
-      allow read, update: if request.auth != null && 
-                          (request.auth.uid == resource.data.workerId ||
-                           request.auth.uid == resource.data.employerId);
+      // Workers can read their own applications
+      // Employers can read applications for their vacancies
+      allow read: if request.auth != null && 
+                  (request.auth.uid == resource.data.workerId ||
+                   request.auth.uid == resource.data.employerId);
+      
+      // Both can update (for status changes, timeline, etc.)
+      allow update: if request.auth != null && 
+                    (request.auth.uid == resource.data.workerId ||
+                     request.auth.uid == resource.data.employerId);
       
       // Workers can delete (withdraw) their own applications
       // Employers can delete applications for their vacancies
@@ -58,6 +67,16 @@ service cloud.firestore {
                     resource.data.recipientId == request.auth.uid;
     }
 
+    // Wallets collection - users can read/write their own wallet
+    match /wallets/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Transactions subcollection
+      match /transactions/{transactionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
     // Attendance collection - for check-in/check-out functionality
     match /attendance/{attendanceId} {
       allow read: if request.auth != null &&
@@ -75,10 +94,15 @@ service cloud.firestore {
                             resource.data.fromUserId == request.auth.uid;
     }
 
-    // Deny by default - must be last
+    // Payout requests - users can create/read their own
+    match /payoutRequests/{requestId} {
+      allow read: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+    }
+
+    // Deny all other access by default - MUST BE LAST
     match /{document=**} {
-      allow read: if false;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }
